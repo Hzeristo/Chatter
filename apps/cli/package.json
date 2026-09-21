@@ -1,0 +1,19 @@
+{
+  "name": "@mas-chat/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "mas-chat": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@mas-chat/protocol": "workspace:*",
+    "@mas-chat/runtime": "workspace:*",
+    "@mas-chat/storage": "workspace:*",
+    "openai": "^7.20.0"
+  }
+}

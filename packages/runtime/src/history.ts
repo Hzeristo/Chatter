@@ -42,6 +42,7 @@ export function buildReplayHistory(records: JournalRecord[]): ResponseInputItem[
         pendingInput = [];
         break;
       case "turn.aborted":
+      case "turn.failed":
         if (activeTurnId !== record.turnId) {
           throw new ReplayHistoryError(
             `Abort for ${record.turnId} does not match active turn ${String(activeTurnId)}`,

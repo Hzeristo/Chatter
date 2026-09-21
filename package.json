@@ -9,6 +9,8 @@
   },
   "scripts": {
     "build": "pnpm -r build",
+    "cli": "node --use-env-proxy apps/cli/dist/index.js",
+    "smoke:api": "pnpm run build && node --use-env-proxy apps/cli/dist/api-smoke.js",
     "test": "pnpm run build && vitest run",
     "typecheck": "tsc -b --pretty false"
   },

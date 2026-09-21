@@ -39,4 +39,51 @@ describe("stateless Responses request", () => {
       store: false,
     });
   });
+
+  it("applies configurable inference settings without unlocking stateless streaming", () => {
+    const request = buildStatelessResponseRequest(
+      [],
+      [{ role: "user", content: "Question" }] as ResponseInputItem[],
+      {
+        model: "compatible-model",
+        reasoningEffort: "high",
+        reasoningSummary: "detailed",
+        textVerbosity: "low",
+        enableWebSearch: false,
+        enableCodeInterpreter: true,
+      },
+    );
+
+    expect(request).toMatchObject({
+      model: "compatible-model",
+      background: true,
+      stream: true,
+      store: false,
+      reasoning: {
+        effort: "high",
+        summary: "detailed",
+        context: "all_turns",
+      },
+      text: { verbosity: "low" },
+      tools: [{ type: "code_interpreter" }],
+    });
+    expect(request.include).toEqual([
+      "reasoning.encrypted_content",
+      "code_interpreter_call.outputs",
+    ]);
+  });
+
+  it("can build an explicit foreground fallback while keeping local state authoritative", () => {
+    const request = buildStatelessResponseRequest(
+      [],
+      [{ role: "user", content: "Question" }] as ResponseInputItem[],
+      {},
+      false,
+    );
+
+    expect(request.background).toBeUndefined();
+    expect(request.stream).toBe(true);
+    expect(request.store).toBe(false);
+    expect(snapshotRunConfiguration(request).background).toBe(false);
+  });
 });

@@ -9,11 +9,19 @@ import type {
   ResponseInputItem,
 } from "openai/resources/responses/responses";
 
-import type { JsonObject, NormalizedEvent } from "@mas-chat/protocol";
+import type {
+  JsonObject,
+  NormalizedEvent,
+  RunConfigurationSnapshot,
+} from "@mas-chat/protocol";
 import { SessionStore } from "@mas-chat/storage";
 
 import { RunController } from "./controller.js";
-import { StreamEndedWithoutTerminalError } from "./errors.js";
+import {
+  ForegroundResponseNotCancellableError,
+  ForegroundResponseNotResumableError,
+  StreamEndedWithoutTerminalError,
+} from "./errors.js";
 import { buildReplayHistory } from "./history.js";
 import type { ResponsesTransport } from "./transport.js";
 
@@ -56,6 +64,7 @@ class FakeTransport implements ResponsesTransport {
   readonly createEvents: JsonObject[];
   readonly resumeEvents: JsonObject[];
   readonly createError: Error | undefined;
+  readonly rejectBackground: boolean;
   readonly requests: ResponseCreateParamsStreaming[] = [];
   readonly resumeCalls: Array<{ responseId: string; startingAfter: number }> = [];
   cancelResponse: JsonObject = {
@@ -68,16 +77,23 @@ class FakeTransport implements ResponsesTransport {
     createEvents?: JsonObject[];
     resumeEvents?: JsonObject[];
     createError?: Error;
+    rejectBackground?: boolean;
   }) {
     this.createEvents = options.createEvents ?? [];
     this.resumeEvents = options.resumeEvents ?? [];
     this.createError = options.createError;
+    this.rejectBackground = options.rejectBackground ?? false;
   }
 
   async create(
     request: ResponseCreateParamsStreaming,
   ): Promise<AsyncIterable<JsonObject>> {
     this.requests.push(request);
+    if (request.background === true && this.rejectBackground) {
+      throw Object.assign(new Error("400 Unsupported parameter: background"), {
+        status: 400,
+      });
+    }
     if (this.createError !== undefined) {
       throw this.createError;
     }
@@ -194,6 +210,144 @@ describe("RunController", () => {
     expect(metadata.status).toBe("failed");
     expect(metadata.activeTurnId).toBeUndefined();
     expect(buildReplayHistory(await store.readJournal("session-1"))).toEqual([]);
+  });
+
+  it("falls back once to foreground only for an explicit unsupported-background error", async () => {
+    const store = await temporaryStore();
+    const transport = new FakeTransport({
+      createEvents: await loadFixture(),
+      rejectBackground: true,
+    });
+    const turnIds = ["turn-background", "turn-foreground"];
+    const controller = new RunController(
+      store,
+      transport,
+      () => turnIds.shift()!,
+    );
+    const input = [{ role: "user", content: "Question" }] as ResponseInputItem[];
+
+    const normalized = await collect(
+      controller.start(input, {
+        sessionId: "session-1",
+        backgroundFallback: "on_unsupported",
+      }),
+    );
+
+    expect(normalized.at(-1)).toMatchObject({
+      kind: "terminal",
+      status: "completed",
+    });
+    expect(transport.requests.map((request) => request.background)).toEqual([
+      true,
+      undefined,
+    ]);
+    const records = await store.readJournal("session-1");
+    expect(
+      records
+        .filter((record) => record.kind === "turn.input")
+        .map((record) => record.configuration.background),
+    ).toEqual([true, false]);
+    expect(records.map((record) => record.kind)).toContain("turn.aborted");
+    expect(buildReplayHistory(records)).toHaveLength(5);
+  });
+
+  it("does not fallback for other 400 responses", async () => {
+    const store = await temporaryStore();
+    const error = Object.assign(new Error("400 Unsupported model"), {
+      status: 400,
+    });
+    const transport = new FakeTransport({ createError: error });
+    const controller = new RunController(store, transport, () => "turn-1");
+    const input = [{ role: "user", content: "Question" }] as ResponseInputItem[];
+
+    await expect(
+      collect(
+        controller.start(input, {
+          sessionId: "session-1",
+          backgroundFallback: "on_unsupported",
+        }),
+      ),
+    ).rejects.toThrow("Unsupported model");
+    expect(transport.requests).toHaveLength(1);
+  });
+
+  it("marks a disconnected foreground fallback failed instead of leaving it attachable", async () => {
+    const store = await temporaryStore();
+    const fixture = await loadFixture();
+    const transport = new FakeTransport({
+      createEvents: fixture.slice(0, 2),
+      rejectBackground: true,
+    });
+    const turnIds = ["turn-background", "turn-foreground"];
+    const controller = new RunController(
+      store,
+      transport,
+      () => turnIds.shift()!,
+    );
+    const input = [{ role: "user", content: "Question" }] as ResponseInputItem[];
+
+    await expect(
+      collect(
+        controller.start(input, {
+          sessionId: "session-1",
+          backgroundFallback: "on_unsupported",
+        }),
+      ),
+    ).rejects.toBeInstanceOf(StreamEndedWithoutTerminalError);
+
+    const metadata = await store.loadMetadata("session-1");
+    expect(metadata.status).toBe("failed");
+    expect(metadata.activeTurnId).toBeUndefined();
+    expect((await store.readJournal("session-1")).at(-1)).toMatchObject({
+      kind: "turn.failed",
+      responseId: "resp_fixture",
+    });
+    expect(
+      buildReplayHistory(await store.readJournal("session-1")),
+    ).toEqual([]);
+  });
+
+  it("rejects attach and server cancellation for an active foreground turn", async () => {
+    const store = await temporaryStore();
+    const configuration: RunConfigurationSnapshot = {
+      model: "gpt-6-astra",
+      background: false,
+      stream: true,
+      store: false,
+      instructions: "test",
+      reasoning: { effort: "max", summary: "auto", context: "all_turns" },
+      text: { verbosity: "medium" },
+      tools: [],
+      include: ["reasoning.encrypted_content"],
+    };
+    await store.beginTurn(
+      "session-1",
+      "turn-foreground",
+      [{ role: "user", content: "Question" }],
+      configuration,
+    );
+    await store.recordResponseEvent(
+      "session-1",
+      "turn-foreground",
+      "resp-foreground",
+      {
+        type: "response.created",
+        sequence_number: 0,
+        response: {
+          id: "resp-foreground",
+          status: "in_progress",
+          output: [],
+        },
+      },
+    );
+    const controller = new RunController(store, new FakeTransport({}));
+
+    await expect(collect(controller.attach("session-1"))).rejects.toBeInstanceOf(
+      ForegroundResponseNotResumableError,
+    );
+    await expect(controller.cancel("session-1")).rejects.toBeInstanceOf(
+      ForegroundResponseNotCancellableError,
+    );
   });
 
   it("records cancellation as a terminal snapshot without inventing an SSE cursor", async () => {

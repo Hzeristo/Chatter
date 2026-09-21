@@ -26,6 +26,8 @@ OpenAI-hosted tools may be enabled explicitly per run. Local tools require a sep
 - Preserve Responses API structure. Do not flatten reasoning summaries, assistant phases, tool calls, annotations, usage, or terminal statuses into one text string.
 - Every Response request must use `store: false`. Do not use `previous_response_id` or Conversations as the source of cross-turn state; replay the complete locally persisted native item history instead.
 - Preserve every completed `response.output` item, including encrypted reasoning content and assistant phase values, before allowing the next turn.
+- Prefer background streaming. Foreground fallback is allowed only after an explicit HTTP 400 unsupported-`background` error and only when the global policy enables it; never fallback for authentication, rate-limit, model, or network failures.
+- Journal the actual execution mode. Foreground runs are not attachable after disconnect and cannot use the server-side cancel endpoint; do not represent them as durable background runs.
 - Persist the response ID and highest acknowledged sequence number before acknowledging an event to the UI.
 - Event replay must be idempotent. Duplicate events after reconnect must not duplicate visible text or tool state.
 - Keep the developer prompt short, versioned, visible, and user-editable.

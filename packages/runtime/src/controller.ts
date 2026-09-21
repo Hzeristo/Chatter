@@ -16,7 +16,11 @@ import type {
   TerminalStatus,
 } from "@mas-chat/protocol";
 
-import { StreamEndedWithoutTerminalError } from "./errors.js";
+import {
+  ForegroundResponseNotCancellableError,
+  ForegroundResponseNotResumableError,
+  StreamEndedWithoutTerminalError,
+} from "./errors.js";
 import { buildReplayHistory } from "./history.js";
 import {
   createResponseProjection,
@@ -41,6 +45,11 @@ export interface RunStore {
     items: OpenAINativeItem[],
     configuration: RunConfigurationSnapshot,
   ): Promise<SessionMetadata>;
+  failTurn(
+    sessionId: string,
+    turnId: string,
+    error: JsonObject,
+  ): Promise<SessionMetadata>;
   loadMetadata(sessionId: string): Promise<SessionMetadata>;
   readJournal(sessionId: string): Promise<JournalRecord[]>;
   recordResponseEvent(
@@ -60,7 +69,16 @@ export interface RunStore {
 }
 
 export interface StartRunOptions extends StatelessRequestOptions {
+  backgroundFallback?: BackgroundFallbackPolicy;
   sessionId: string;
+}
+
+export type BackgroundFallbackPolicy = "never" | "on_unsupported";
+
+interface PreparedTurn {
+  background: boolean;
+  stream: AsyncIterable<JsonObject>;
+  turnId: string;
 }
 
 function objectValue(value: JsonValue | undefined): JsonObject | undefined {
@@ -120,6 +138,27 @@ function nativeItems(items: ResponseInputItem[]): OpenAINativeItem[] {
   return items as unknown as OpenAINativeItem[];
 }
 
+function isUnsupportedBackgroundError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const status = (error as Error & { status?: unknown }).status;
+  return (
+    status === 400 &&
+    /unsupported\s+parameter\s*:\s*background/i.test(error.message)
+  );
+}
+
+function turnUsesBackground(records: JournalRecord[], turnId: string): boolean {
+  const input = records.find(
+    (record) => record.kind === "turn.input" && record.turnId === turnId,
+  );
+  if (input === undefined || input.kind !== "turn.input") {
+    throw new Error(`Turn ${turnId} has no persisted request configuration`);
+  }
+  return input.configuration.background;
+}
+
 export class RunController {
   readonly #store: RunStore;
   readonly #transport: ResponsesTransport;
@@ -141,32 +180,37 @@ export class RunController {
   ): AsyncGenerator<NormalizedEvent> {
     const records = await this.#store.readJournal(options.sessionId);
     const history = buildReplayHistory(records);
-    const request = buildStatelessResponseRequest(history, newItems, options);
-    const turnId = this.#turnId();
-    await this.#store.beginTurn(
-      options.sessionId,
-      turnId,
-      nativeItems(newItems),
-      snapshotRunConfiguration(request),
-    );
-
-    let stream: AsyncIterable<JsonObject>;
+    let prepared: PreparedTurn;
     try {
-      stream = await this.#transport.create(request);
-    } catch (error) {
-      await this.#store.abortTurn(
+      prepared = await this.prepareTurn(
         options.sessionId,
-        turnId,
-        errorRecord(error),
+        history,
+        newItems,
+        options,
+        true,
       );
-      throw error;
+    } catch (error) {
+      if (
+        options.backgroundFallback !== "on_unsupported" ||
+        !isUnsupportedBackgroundError(error)
+      ) {
+        throw error;
+      }
+      prepared = await this.prepareTurn(
+        options.sessionId,
+        history,
+        newItems,
+        options,
+        false,
+      );
     }
 
     yield* this.consume(
       options.sessionId,
-      turnId,
-      stream,
+      prepared.turnId,
+      prepared.stream,
       createResponseProjection(),
+      prepared.background,
     );
   }
 
@@ -203,6 +247,10 @@ export class RunController {
       return;
     }
 
+    if (!turnUsesBackground(records, metadata.activeTurnId)) {
+      throw new ForegroundResponseNotResumableError(sessionId);
+    }
+
     const stream = await this.#transport.resume(
       metadata.responseId,
       metadata.lastSequenceNumber,
@@ -212,6 +260,7 @@ export class RunController {
       metadata.activeTurnId,
       stream,
       projection,
+      true,
     );
   }
 
@@ -219,6 +268,11 @@ export class RunController {
     const metadata = await this.#store.loadMetadata(sessionId);
     if (metadata.activeTurnId === undefined || metadata.responseId === undefined) {
       throw new Error(`Session ${sessionId} has no cancellable response`);
+    }
+
+    const records = await this.#store.readJournal(sessionId);
+    if (!turnUsesBackground(records, metadata.activeTurnId)) {
+      throw new ForegroundResponseNotCancellableError(sessionId);
     }
 
     const response = await this.#transport.cancel(metadata.responseId);
@@ -254,55 +308,102 @@ export class RunController {
     turnId: string,
     stream: AsyncIterable<JsonObject>,
     initialProjection: ReturnType<typeof createResponseProjection>,
+    background: boolean,
   ): AsyncGenerator<NormalizedEvent> {
     let projection = initialProjection;
     let sawTerminal = false;
 
-    for await (const event of stream) {
-      const result = reduceResponseEvent(projection, event);
-      projection = result.state;
-      if (result.duplicate) {
-        continue;
-      }
+    try {
+      for await (const event of stream) {
+        const result = reduceResponseEvent(projection, event);
+        projection = result.state;
+        if (result.duplicate) {
+          continue;
+        }
 
-      const responseId = projection.responseId ?? responseIdFromEvent(event);
-      if (responseId === undefined) {
-        throw new Error("Response stream emitted an event before response ID was known");
-      }
+        const responseId = projection.responseId ?? responseIdFromEvent(event);
+        if (responseId === undefined) {
+          throw new Error(
+            "Response stream emitted an event before response ID was known",
+          );
+        }
 
-      await this.#store.recordResponseEvent(
-        sessionId,
-        turnId,
-        responseId,
-        event,
-      );
-
-      if (isTerminalStatus(projection.status)) {
-        const response = objectValue(event.response);
-        await this.#store.recordTurnOutput(
+        await this.#store.recordResponseEvent(
           sessionId,
           turnId,
           responseId,
-          projection.status,
-          responseOutputFromEvent(event),
-          response,
+          event,
         );
-        sawTerminal = true;
-      }
 
-      for (const normalized of result.normalized) {
-        yield normalized;
-      }
+        if (isTerminalStatus(projection.status)) {
+          const response = objectValue(event.response);
+          await this.#store.recordTurnOutput(
+            sessionId,
+            turnId,
+            responseId,
+            projection.status,
+            responseOutputFromEvent(event),
+            response,
+          );
+          sawTerminal = true;
+        }
 
-      if (sawTerminal) {
-        return;
+        for (const normalized of result.normalized) {
+          yield normalized;
+        }
+
+        if (sawTerminal) {
+          return;
+        }
       }
+    } catch (error) {
+      if (!background) {
+        await this.#store.failTurn(sessionId, turnId, errorRecord(error));
+      }
+      throw error;
     }
 
-    throw new StreamEndedWithoutTerminalError(
+    const error = new StreamEndedWithoutTerminalError(
       projection.lastSequenceNumber,
       projection.responseId,
     );
+    if (!background) {
+      await this.#store.failTurn(sessionId, turnId, errorRecord(error));
+    }
+    throw error;
+  }
+
+  private async prepareTurn(
+    sessionId: string,
+    history: ResponseInputItem[],
+    newItems: ResponseInputItem[],
+    options: StatelessRequestOptions,
+    background: boolean,
+  ): Promise<PreparedTurn> {
+    const request = buildStatelessResponseRequest(
+      history,
+      newItems,
+      options,
+      background,
+    );
+    const turnId = this.#turnId();
+    await this.#store.beginTurn(
+      sessionId,
+      turnId,
+      nativeItems(newItems),
+      snapshotRunConfiguration(request),
+    );
+
+    try {
+      return {
+        background,
+        stream: await this.#transport.create(request),
+        turnId,
+      };
+    } catch (error) {
+      await this.#store.abortTurn(sessionId, turnId, errorRecord(error));
+      throw error;
+    }
   }
 }
 

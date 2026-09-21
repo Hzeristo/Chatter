@@ -39,3 +39,21 @@ export class StreamEndedWithoutTerminalError extends Error {
     }
   }
 }
+
+export class ForegroundResponseNotResumableError extends Error {
+  constructor(sessionId: string) {
+    super(
+      `Session ${sessionId} is using foreground fallback and cannot be resumed after disconnect`,
+    );
+    this.name = "ForegroundResponseNotResumableError";
+  }
+}
+
+export class ForegroundResponseNotCancellableError extends Error {
+  constructor(sessionId: string) {
+    super(
+      `Session ${sessionId} is using foreground fallback; cancel it by terminating the active client connection`,
+    );
+    this.name = "ForegroundResponseNotCancellableError";
+  }
+}

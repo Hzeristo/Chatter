@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "smoke:api": "node --use-env-proxy dist/api-smoke.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

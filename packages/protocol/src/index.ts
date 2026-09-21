@@ -32,7 +32,7 @@ export type TerminalStatus = Extract<
 >;
 
 export interface RunConfigurationSnapshot extends JsonObject {
-  background: true;
+  background: boolean;
   include: JsonValue[];
   instructions: string;
   model: string;
@@ -83,12 +83,20 @@ export interface TurnAbortedRecord extends JournalRecordBase {
   turnId: string;
 }
 
+export interface TurnFailedRecord extends JournalRecordBase {
+  error: JsonObject;
+  kind: "turn.failed";
+  responseId?: string;
+  turnId: string;
+}
+
 export type JournalRecord =
   | SessionCreatedRecord
   | TurnInputRecord
   | ResponseEventRecord
   | TurnOutputRecord
-  | TurnAbortedRecord;
+  | TurnAbortedRecord
+  | TurnFailedRecord;
 
 export interface SessionMetadata {
   activeTurnId?: string;

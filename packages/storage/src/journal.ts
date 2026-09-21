@@ -18,6 +18,7 @@ import {
   type SessionMetadata,
   type TerminalStatus,
   type TurnAbortedRecord,
+  type TurnFailedRecord,
   type TurnInputRecord,
   type TurnOutputRecord,
 } from "@mas-chat/protocol";
@@ -196,6 +197,17 @@ function rebuildMetadata(
         metadata = {
           ...stable,
           lastSequenceNumber: -1,
+          status: "failed",
+          updatedAt: record.at,
+        };
+        break;
+      case "turn.failed":
+        const { activeTurnId: _failedTurnId, ...withoutFailedTurn } = metadata;
+        metadata = {
+          ...withoutFailedTurn,
+          ...(record.responseId === undefined
+            ? {}
+            : { responseId: record.responseId }),
           status: "failed",
           updatedAt: record.at,
         };
@@ -465,6 +477,48 @@ export class SessionStore {
       const metadata: SessionMetadata = {
         ...stable,
         lastSequenceNumber: -1,
+        status: "failed",
+        updatedAt: at,
+      };
+
+      await appendAndSync(this.journalPath(sessionId), record);
+      await writeJsonAtomically(this.metadataPath(sessionId), metadata);
+      return metadata;
+    });
+  }
+
+  async failTurn(
+    sessionId: string,
+    turnId: string,
+    error: JsonObject,
+    now = new Date(),
+  ): Promise<SessionMetadata> {
+    assertSafeId(sessionId);
+    assertSafeId(turnId);
+
+    return this.withLock(sessionId, async () => {
+      const current = await this.loadMetadataUnlocked(sessionId);
+      if (current.activeTurnId !== turnId) {
+        throw new SessionStateError(
+          `Turn ${turnId} is not active for session ${sessionId}`,
+        );
+      }
+
+      const at = now.toISOString();
+      const record: TurnFailedRecord = {
+        schemaVersion: JOURNAL_SCHEMA_VERSION,
+        kind: "turn.failed",
+        sessionId,
+        turnId,
+        error,
+        at,
+      };
+      if (current.responseId !== undefined) {
+        record.responseId = current.responseId;
+      }
+      const { activeTurnId: _failedTurnId, ...withoutActiveTurn } = current;
+      const metadata: SessionMetadata = {
+        ...withoutActiveTurn,
         status: "failed",
         updatedAt: at,
       };

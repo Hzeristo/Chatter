@@ -11,7 +11,8 @@ import type {
 } from "@mas-chat/protocol";
 
 export interface StatelessRequestOptions {
-  developerPrompt?: string;
+  /** `null` deliberately omits the Responses `instructions` field. */
+  developerPrompt?: string | null;
   enableCodeInterpreter?: boolean;
   enableWebSearch?: boolean;
   model?: string;
@@ -76,6 +77,10 @@ export function buildStatelessResponseRequest(
   if (tools.some((tool) => tool.type === "code_interpreter")) {
     include.push("code_interpreter_call.outputs");
   }
+  const instructions =
+    options.developerPrompt === null
+      ? undefined
+      : (options.developerPrompt ?? DEFAULT_DEVELOPER_PROMPT);
 
   return {
     model: options.model ?? "gpt-6-astra",
@@ -83,7 +88,7 @@ export function buildStatelessResponseRequest(
     stream: true,
     store: false,
     input: [...history, ...newItems],
-    instructions: options.developerPrompt ?? DEFAULT_DEVELOPER_PROMPT,
+    ...(instructions === undefined ? {} : { instructions }),
     reasoning: {
       effort: options.reasoningEffort ?? "max",
       summary: options.reasoningSummary ?? "auto",
@@ -112,7 +117,9 @@ export function snapshotRunConfiguration(
     background: request.background === true,
     stream: true,
     store: false,
-    instructions: request.instructions ?? "",
+    ...(typeof request.instructions === "string"
+      ? { instructions: request.instructions }
+      : {}),
     reasoning: structuredClone((request.reasoning ?? {}) as JsonObject),
     text: structuredClone((request.text ?? {}) as JsonObject),
     tools: structuredClone((request.tools ?? []) as unknown as JsonObject[]),

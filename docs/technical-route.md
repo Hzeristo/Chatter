@@ -3,13 +3,24 @@
 状态：Accepted
 
 日期：2026-09-20
-最近更新：2026-09-20（强制 `store: false`；增加全局 foreground fallback）
+最近更新：2026-09-20（强制 `store: false`；增加全局 foreground fallback；锁定网页端式回答目标）
 
 ## 1. 产品目标
 
-实现一个本地、API 驱动的 OpenAI 长任务聊天客户端。目标体验接近 ChatGPT Web 的高强度任务模式：单次任务可持续数十分钟，持续呈现推理摘要、托管工具进度和阶段性文本，最后明确收束为最终答案。
+实现一个本地、API 驱动的 OpenAI 长任务聊天客户端。目标体验接近 ChatGPT Web：既能承载可持续数十分钟的任务，持续呈现推理摘要、托管工具进度和阶段性文本；也能在开放式闲聊和思想讨论中保持松弛、连续推进、密度扎实的长回答，而不是把每个 turn 都压缩成任务收束流程。
 
 需要避免的不是 agent 行为，而是沉重 agent harness。核心运行时不应携带代码仓库治理、自动补丁、测试循环、权限编排、子代理或大段隐藏提示词。
+
+### 1.1 Prompt 产品目标（已锁定）
+
+最终 developer prompt 的目标是复刻网页端的回答轨迹，而不是建立一套必须逐条服从的行为规章：
+
+- **松弛**：开放式交流不默认进入“接单、执行、汇报、收尾”的 agent 模式；除非用户明确要求，否则不主动制造进度报告、任务清单或结案句。
+- **连续推进**：把用户的陈述、类比、判断和半成品想法当作正在展开的对话，沿其隐含问题继续推进，保留上下文中的概念和张力，不在第一个合理结论处提前关闭。
+- **密度扎实**：当话题本身值得展开时，补充结构、推论、边界、反例、关联和更强的表述，让回答自然变长；长度由思想密度决定，不由固定字数或“尽快给最终答案”决定。
+- **适配语境**：简单请求仍可简洁；复杂、开放、抽象或具有审美/理论张力的交流则允许多段连续论证，不被模板化的总结结构打断。
+
+这不是“越长越好”，也不是要求暴露 chain-of-thought。prompt 应描述期望的交互结果，避免把每个局部行为都写成硬性命令。当前 `general-assistant-v1` 作为约束较密的实验样本保留用于回归，不代表最终 prompt。
 
 ## 2. 明确的非目标
 
@@ -227,6 +238,8 @@ Foreground fallback 仍按相同顺序落盘 SSE 和 terminal output，但连接
 - SDK 与 REST 新能力可能不同步：transport 封装必须薄，避免依赖未公开内部实现。
 - 非官方 `OPENAI_BASE_URL` 可能只兼容基础生成而不支持 background stream、`starting_after` 或 cancel；必须按能力逐项烟测，不能因一次普通请求成功就判定兼容。
 - Foreground fallback 牺牲运行中断线恢复和跨进程取消，只用于扩大兼容性，不能用于宣称已经满足 30 分钟耐久性验收。
+- 过密的行为约束可能把开放式交流重新解释成 agent 任务：`complete the task`、`answer directly`、`final answer` 等收束语义可能提高 premature closure 和“working as agent”轨迹的概率，削弱松弛的连续长回答。API 不暴露 logits，因此这目前是待验证的机制假设，不是已证实的因果结论。
+- Prompt 实验不能只看输出字符数：需要同时记录 reasoning token、输出结构、论证推进、结论出现位置和盲评的语境适配度，避免把无效冗长误判为网页端风格。
 
 ## 12. 官方依据
 
@@ -234,4 +247,6 @@ Foreground fallback 仍按相同顺序落盘 SSE 和 terminal output，但连接
 - Reasoning models and summaries: <https://developers.openai.com/api/docs/guides/reasoning>
 - Conversation state: <https://developers.openai.com/api/docs/guides/conversation-state>
 - Streaming Responses: <https://developers.openai.com/api/docs/guides/streaming-responses>
+- Prompting: <https://developers.openai.com/api/docs/guides/prompting>
+- Reasoning best practices: <https://developers.openai.com/api/docs/guides/reasoning-best-practices>
 - GPT-6 Astra: <https://developers.openai.com/api/docs/models/gpt-6-astra>

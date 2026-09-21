@@ -34,7 +34,7 @@ export type TerminalStatus = Extract<
 export interface RunConfigurationSnapshot extends JsonObject {
   background: boolean;
   include: JsonValue[];
-  instructions: string;
+  instructions?: string;
   model: string;
   reasoning: JsonObject;
   store: false;

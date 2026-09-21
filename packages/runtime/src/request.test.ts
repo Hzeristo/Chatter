@@ -86,4 +86,17 @@ describe("stateless Responses request", () => {
     expect(request.store).toBe(false);
     expect(snapshotRunConfiguration(request).background).toBe(false);
   });
+
+  it("can omit instructions for a native model baseline", () => {
+    const request = buildStatelessResponseRequest(
+      [],
+      [{ role: "user", content: "Question" }] as ResponseInputItem[],
+      { developerPrompt: null },
+    );
+
+    expect(request).not.toHaveProperty("instructions");
+    expect(snapshotRunConfiguration(request)).not.toHaveProperty(
+      "instructions",
+    );
+  });
 });

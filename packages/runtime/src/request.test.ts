@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 
 import {
+  buildSessionInstructions,
   buildStatelessResponseRequest,
   snapshotRunConfiguration,
 } from "./request.js";
@@ -34,6 +35,10 @@ describe("stateless Responses request", () => {
     });
     expect(request.text).toEqual({ verbosity: "medium" });
     expect(request.include).toContain("reasoning.encrypted_content");
+    expect(request.instructions).toContain(
+      "Continue the established conversation naturally",
+    );
+    expect(request.instructions).not.toContain("Help the user complete");
     expect(snapshotRunConfiguration(request)).toMatchObject({
       model: "gpt-6-astra",
       store: false,
@@ -87,7 +92,7 @@ describe("stateless Responses request", () => {
     expect(snapshotRunConfiguration(request).background).toBe(false);
   });
 
-  it("can omit instructions for a native model baseline", () => {
+  it("can omit both prompt layers for a native model baseline", () => {
     const request = buildStatelessResponseRequest(
       [],
       [{ role: "user", content: "Question" }] as ResponseInputItem[],
@@ -95,8 +100,70 @@ describe("stateless Responses request", () => {
     );
 
     expect(request).not.toHaveProperty("instructions");
+    expect(request.input).toEqual([{ role: "user", content: "Question" }]);
     expect(snapshotRunConfiguration(request)).not.toHaveProperty(
       "instructions",
     );
+  });
+
+  it("combines the base prompt and continuation cue only on the first request", () => {
+    const request = buildStatelessResponseRequest(
+      [],
+      [{ role: "user", content: "Question" }] as ResponseInputItem[],
+      {
+        developerPrompt: "Base behavior",
+        sessionFollowingInstruction: "Continue this session",
+      },
+    );
+
+    expect(request.input).toEqual([{ role: "user", content: "Question" }]);
+    expect(request.instructions).toBe(
+      "Base behavior\n\nContinue this session",
+    );
+    expect(snapshotRunConfiguration(request).instructions).toBe(
+      "Base behavior\n\nContinue this session",
+    );
+  });
+
+  it("uses only one continuation cue after the first request", () => {
+    const first = buildSessionInstructions(
+      [],
+      {
+        developerPrompt: "Base behavior",
+        sessionFollowingInstruction: "Continue this session",
+      },
+    );
+    const second = buildSessionInstructions(
+      [{ role: "user", content: "First" }] as ResponseInputItem[],
+      {
+        developerPrompt: "Base behavior",
+        sessionFollowingInstruction: "Continue this session",
+      },
+    );
+
+    expect(first).toBe("Base behavior\n\nContinue this session");
+    expect(second).toBe("Continue this session");
+  });
+
+  it("can disable the continuation cue while retaining the first-turn base prompt", () => {
+    const request = buildStatelessResponseRequest(
+      [],
+      [{ role: "user", content: "Question" }] as ResponseInputItem[],
+      {
+        developerPrompt: "Base behavior",
+        sessionFollowingInstruction: null,
+      },
+    );
+
+    expect(request.instructions).toBe("Base behavior");
+    expect(
+      buildSessionInstructions(
+        [{ role: "user", content: "First" }] as ResponseInputItem[],
+        {
+          developerPrompt: "Base behavior",
+          sessionFollowingInstruction: null,
+        },
+      ),
+    ).toBeUndefined();
   });
 });

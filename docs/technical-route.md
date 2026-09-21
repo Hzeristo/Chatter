@@ -3,7 +3,7 @@
 状态：Accepted
 
 日期：2026-09-20
-最近更新：2026-09-20（强制 `store: false`；增加全局 foreground fallback；锁定网页端式回答目标）
+最近更新：2026-09-21（强制 `store: false`；增加全局 foreground fallback；锁定网页端式回答目标；增加 session following instruction）
 
 ## 1. 产品目标
 
@@ -13,7 +13,9 @@
 
 ### 1.1 Prompt 产品目标（已锁定）
 
-最终 developer prompt 的目标是复刻网页端的回答轨迹，而不是建立一套必须逐条服从的行为规章：
+Prompt 分为两层：base developer prompt 负责通用交互目标，只在 session 首轮发送一次；短的 session following instruction 负责延续当前会话已经形成的语气、概念和未完线索，每轮都作为请求级 `instructions` 发送。首轮 `instructions` 由两者组成，后续轮只有 following instruction，因此 base 不会被反复注入，following 也不会作为 native input item 在 replay history 中逐轮累积。每轮实际发送的 `instructions` 仍写入 journal configuration。
+
+Base developer prompt 的目标是复刻网页端的回答轨迹，而不是建立一套必须逐条服从的行为规章：
 
 - **松弛**：开放式交流不默认进入“接单、执行、汇报、收尾”的 agent 模式；除非用户明确要求，否则不主动制造进度报告、任务清单或结案句。
 - **连续推进**：把用户的陈述、类比、判断和半成品想法当作正在展开的对话，沿其隐含问题继续推进，保留上下文中的概念和张力，不在第一个合理结论处提前关闭。

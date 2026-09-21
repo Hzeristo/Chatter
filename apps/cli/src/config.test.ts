@@ -34,6 +34,7 @@ describe("CLI configuration", () => {
         "MAS_CHAT_DATA_DIR=state",
         "MAS_CHAT_WEB_SEARCH=false",
         "MAS_CHAT_CODE_INTERPRETER=yes",
+        "MAS_CHAT_SESSION_FOLLOWING_INSTRUCTION=follow the thread",
       ].join("\n"),
       "utf8",
     );
@@ -54,6 +55,7 @@ describe("CLI configuration", () => {
       model: "file-model",
       webSearch: false,
       codeInterpreter: true,
+      sessionFollowingInstruction: "follow the thread",
       backgroundFallback: "on_unsupported",
       envFileLoaded: true,
     });
@@ -71,6 +73,9 @@ describe("CLI configuration", () => {
     expect(config.baseURL).toBe("https://api.openai.com/v1");
     expect(config.model).toBe("gpt-6-astra");
     expect(config.reasoningEffort).toBe("max");
+    expect(config.sessionFollowingInstruction).toContain(
+      "Continue the established conversation naturally",
+    );
     expect(config.dataDirectory).toBe(path.join(cwd, ".chat-runtime"));
   });
 

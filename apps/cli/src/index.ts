@@ -71,6 +71,7 @@ function printableConfig(config: MasChatConfig) {
     webSearch: config.webSearch,
     codeInterpreter: config.codeInterpreter,
     developerPrompt: config.developerPrompt,
+    sessionFollowingInstruction: config.sessionFollowingInstruction,
     execution: {
       preferred: "background",
       fallback: config.backgroundFallback,

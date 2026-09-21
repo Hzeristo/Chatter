@@ -2,7 +2,10 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { parseEnv } from "node:util";
 
-import { DEFAULT_DEVELOPER_PROMPT } from "@mas-chat/runtime";
+import {
+  DEFAULT_DEVELOPER_PROMPT,
+  DEFAULT_SESSION_FOLLOWING_INSTRUCTION_V1,
+} from "@mas-chat/runtime";
 import type {
   BackgroundFallbackPolicy,
   StartRunOptions,
@@ -28,6 +31,7 @@ export interface MasChatConfig {
   codeInterpreter: boolean;
   dataDirectory: string;
   developerPrompt: string;
+  sessionFollowingInstruction: string;
   envFileLoaded: boolean;
   envFilePath: string;
   model: string;
@@ -190,6 +194,9 @@ export function loadConfig(options: LoadConfigOptions = {}): MasChatConfig {
     dataDirectory: path.resolve(cwd, dataDirectoryValue),
     developerPrompt:
       values.MAS_CHAT_DEVELOPER_PROMPT ?? DEFAULT_DEVELOPER_PROMPT,
+    sessionFollowingInstruction:
+      values.MAS_CHAT_SESSION_FOLLOWING_INSTRUCTION ??
+      DEFAULT_SESSION_FOLLOWING_INSTRUCTION_V1,
     envFileLoaded: existsSync(envFilePath),
     envFilePath,
     model: requiredString(values, "MAS_CHAT_MODEL", "gpt-6-astra"),
@@ -235,6 +242,7 @@ export function requestOptionsFromConfig(
     backgroundFallback: config.backgroundFallback,
     model: config.model,
     developerPrompt: config.developerPrompt,
+    sessionFollowingInstruction: config.sessionFollowingInstruction,
     reasoningEffort: config.reasoningEffort,
     reasoningSummary: config.reasoningSummary,
     textVerbosity: config.textVerbosity,

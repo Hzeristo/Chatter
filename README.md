@@ -13,7 +13,7 @@
 - 长任务优先使用 `background: true` 与 `stream: true`；端点明确拒绝 `background` 时可按全局策略重试一次 foreground。只有 background 模式支持断线后 `starting_after` 恢复。
 - 所有请求强制 `store: false`；跨轮会话通过本地保存并原样重放全部 Responses input/output items 延续，不使用 `previous_response_id`。
 - 第一阶段只允许 OpenAI 托管工具，如 `web_search` 和 `code_interpreter`；不提供本地 shell、文件系统、仓库读取、MCP 或子代理。
-- 默认开发者提示词保持短小、可见、可编辑。
+- 开发者提示词保持短小、可见、可编辑：首轮 `instructions` 为 base prompt 加 following cue，后续每轮只发送 following cue。
 
 正式决策见 [docs/technical-route.md](docs/technical-route.md)，开源项目审计见 [docs/open-source-audit.md](docs/open-source-audit.md)。
 
@@ -84,7 +84,8 @@ CLI 会静态读取当前工作目录的 `.env`，无需 `dotenv` 包。项目�
 | `MAS_CHAT_CODE_INTERPRETER` | `false` | 是否启用 Code Interpreter |
 | `MAS_CHAT_BACKGROUND_FALLBACK` | `on_unsupported` | `on_unsupported` 或 `never`；仅针对明确拒绝 background 的 400 |
 | `MAS_CHAT_DATA_DIR` | `.chat-runtime` | JSONL 与 metadata 根目录 |
-| `MAS_CHAT_DEVELOPER_PROMPT` | 内置短 prompt | 可见且逐 turn 落盘的 developer prompt |
+| `MAS_CHAT_DEVELOPER_PROMPT` | 内置短 prompt | 每个 session 仅在首轮 `instructions` 中发送一次 |
+| `MAS_CHAT_SESSION_FOLLOWING_INSTRUCTION` | 内置短 continuation cue | 每轮作为请求级 `instructions` 注入；后续轮不再拼接 base prompt |
 
 替代 `OPENAI_BASE_URL` 至少必须支持 streaming Responses。若还支持 background streaming create、带 `starting_after` 的 streaming retrieve 和 cancel，客户端可提供完整长任务恢复；否则在全局 fallback 为 `on_unsupported` 时降级为不可恢复、不可通过服务端 API 取消的 foreground stream。仅兼容 Chat Completions 的代理仍不能运行本客户端。
 

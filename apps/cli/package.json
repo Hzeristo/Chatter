@@ -6,6 +6,12 @@
   "bin": {
     "mas-chat": "./dist/index.js"
   },
+  "exports": {
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "default": "./dist/config.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "smoke:api": "node --use-env-proxy dist/api-smoke.js",

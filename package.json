@@ -10,6 +10,7 @@
   "scripts": {
     "build": "pnpm -r build",
     "cli": "node --use-env-proxy apps/cli/dist/index.js",
+    "web": "pnpm run build && node --use-env-proxy apps/web/dist/server.js",
     "smoke:api": "pnpm run build && node --use-env-proxy apps/cli/dist/api-smoke.js",
     "test:prompt-abc": "pnpm run build && node --use-env-proxy apps/cli/dist/prompt-ab.js",
     "test": "pnpm run build && vitest run",

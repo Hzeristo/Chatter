@@ -212,8 +212,11 @@ Foreground fallback 仍按相同顺序落盘 SSE 和 terminal output，但连接
 
 ### Phase 4：产品 UI
 
-- 在 runtime 稳定后选择 TUI、Web 或桌面壳；
-- UI 只能消费 protocol，不得重新实现 Responses 状态机。
+状态：Web initial slice complete；后续以实际使用反馈驱动。
+
+- 已增加一个只绑定本地地址的原生 Web 壳，作为 protocol consumer；
+- UI 只能消费 protocol，不得重新实现 Responses 状态机；
+- 视觉、Markdown、会话列表、设置编辑和多用户部署暂不预设，避免在真实交互反馈前过度设计。
 
 ## 10. 验收标准
 

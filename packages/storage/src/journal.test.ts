@@ -41,6 +41,20 @@ afterEach(async () => {
 });
 
 describe("session journal", () => {
+  it("lists sessions in most recently updated order", async () => {
+    const store = await temporaryStore();
+    await store.createSession("older", new Date("2026-09-20T00:00:00Z"));
+    await store.createSession("newer", new Date("2026-09-21T00:00:00Z"));
+
+    const sessions = await store.listSessions();
+
+    expect(sessions.map((session) => session.sessionId)).toEqual([
+      "newer",
+      "older",
+    ]);
+    expect(sessions[0]).toMatchObject({ status: "idle", lastSequenceNumber: -1 });
+  });
+
   it("flushes events before advancing the cursor and ignores duplicate delivery", async () => {
     const store = await temporaryStore();
     await store.createSession("session-1", new Date("2026-09-20T00:00:00Z"));

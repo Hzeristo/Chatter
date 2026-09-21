@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   mkdir,
   open,
+  readdir,
   readFile,
   rename,
 } from "node:fs/promises";
@@ -537,6 +538,25 @@ export class SessionStore {
   async readJournal(sessionId: string): Promise<JournalRecord[]> {
     assertSafeId(sessionId);
     return this.readJournalUnlocked(sessionId);
+  }
+
+  /**
+   * Lists locally persisted sessions without exposing journal contents. The
+   * caller can load a specific journal when it needs a conversation view.
+   */
+  async listSessions(): Promise<SessionMetadata[]> {
+    await mkdir(this.sessionsDirectory, { recursive: true });
+    const entries = await readdir(this.sessionsDirectory, { withFileTypes: true });
+    const sessions: SessionMetadata[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !SAFE_ID.test(entry.name)) {
+        continue;
+      }
+      sessions.push(await this.loadMetadata(entry.name));
+    }
+    return sessions.sort((left, right) =>
+      right.updatedAt.localeCompare(left.updatedAt),
+    );
   }
 
   sessionDirectory(sessionId: string): string {

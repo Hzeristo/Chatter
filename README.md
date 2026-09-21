@@ -57,6 +57,18 @@ pnpm cli -- cancel <session-id>
 pnpm cli -- config
 ```
 
+## 最小 Web 前端
+
+初始 Web 壳保持故意简单：Node 内置 HTTP 服务提供本地 API，浏览器使用原生 HTML/CSS/JS 和 SSE 消费 `NormalizedEvent`。它不在浏览器暴露 API key，也不重新实现 Responses reducer；会话 ID 保存在浏览器 localStorage，同时可以从本地 session 列表选择既有会话，刷新或切换时通过本地 journal 投影并在必要时调用 `attach` 恢复。
+
+```powershell
+pnpm web
+# 默认监听 http://127.0.0.1:8787
+# 可用 MAS_CHAT_WEB_HOST / MAS_CHAT_WEB_PORT 覆盖监听地址和端口
+```
+
+当前 Web API 只覆盖建会话、读取脱敏会话投影、发送 turn、attach 和 cancel。视觉、Markdown 渲染、会话列表和设置页暂不属于初次搭建范围，等实际使用反馈后再决定。
+
 ## 配置
 
 复制示例文件并填写本地值：

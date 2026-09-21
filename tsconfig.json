@@ -4,6 +4,7 @@
     { "path": "./packages/protocol" },
     { "path": "./packages/storage" },
     { "path": "./packages/runtime" },
-    { "path": "./apps/cli" }
+    { "path": "./apps/cli" },
+    { "path": "./apps/web" }
   ]
 }

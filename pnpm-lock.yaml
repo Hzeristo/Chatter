@@ -33,6 +33,24 @@ importers:
         specifier: ^7.20.0
         version: 7.20.0
 
+  apps/web:
+    dependencies:
+      '@mas-chat/cli':
+        specifier: workspace:*
+        version: link:../cli
+      '@mas-chat/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@mas-chat/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
+      '@mas-chat/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
+      openai:
+        specifier: ^7.20.0
+        version: 7.20.0
+
   packages/protocol: {}
 
   packages/runtime:

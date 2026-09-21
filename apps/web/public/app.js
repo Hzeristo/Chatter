@@ -1,3 +1,6 @@
+import katex from "katex";
+import { marked } from "marked";
+
 const elements = {
   badge: document.querySelector("#config-badge"),
   composer: document.querySelector("#composer"),
@@ -6,6 +9,7 @@ const elements = {
   messages: document.querySelector("#messages"),
   newSession: document.querySelector("#new-session"),
   prompt: document.querySelector("#prompt"),
+  promptPreview: document.querySelector("#prompt-preview"),
   send: document.querySelector("#send"),
   sessionSelect: document.querySelector("#session-select"),
   sessionLabel: document.querySelector("#session-label"),
@@ -18,6 +22,84 @@ const state = {
   assistantNodes: new Map(),
 };
 const SESSION_STORAGE_KEY = "mas-chat.session-id";
+
+function escapedMarkdownSource(source) {
+  // Raw HTML is not part of the chat rendering contract. Escaping `<` keeps
+  // Markdown syntax (including blockquotes) while preventing HTML injection.
+  return source.replaceAll("&", "&amp;").replaceAll("<", "&lt;");
+}
+
+function sanitizeFragment(fragment) {
+  const blockedTags = new Set(["SCRIPT", "IFRAME", "OBJECT", "EMBED", "STYLE", "LINK"]);
+  for (const element of fragment.querySelectorAll("*")) {
+    if (blockedTags.has(element.tagName)) {
+      element.remove();
+      continue;
+    }
+    for (const attribute of [...element.attributes]) {
+      const name = attribute.name.toLowerCase();
+      const value = attribute.value.trim();
+      if (name.startsWith("on")) {
+        element.removeAttribute(attribute.name);
+      } else if ((name === "href" || name === "src") && /^(?:javascript|vbscript|data):/i.test(value)) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+  }
+}
+
+function renderInlineMath(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  let current;
+  while ((current = walker.nextNode())) {
+    const parent = current.parentElement;
+    if (parent && !parent.closest("code, pre, .katex")) {
+      textNodes.push(current);
+    }
+  }
+
+  const pattern = /\\\(([\s\S]+?)\\\)|(?<!\\)\$([^$\n]+?)(?<!\\)\$/g;
+  for (const textNode of textNodes) {
+    const source = textNode.nodeValue ?? "";
+    pattern.lastIndex = 0;
+    let lastIndex = 0;
+    let changed = false;
+    const replacement = document.createDocumentFragment();
+    let match;
+    while ((match = pattern.exec(source)) !== null) {
+      const tex = match[1] ?? match[2];
+      if (tex === undefined || tex.trim() === "") continue;
+      changed = true;
+      if (match.index > lastIndex) {
+        replacement.append(source.slice(lastIndex, match.index));
+      }
+      const math = document.createElement("span");
+      math.innerHTML = katex.renderToString(tex, {
+        displayMode: false,
+        output: "htmlAndMathml",
+        throwOnError: false,
+      });
+      replacement.append(...math.childNodes);
+      lastIndex = pattern.lastIndex;
+    }
+    if (!changed) continue;
+    if (lastIndex < source.length) replacement.append(source.slice(lastIndex));
+    textNode.replaceWith(replacement);
+  }
+}
+
+function renderRichText(element, source) {
+  const html = marked.parse(escapedMarkdownSource(source), {
+    breaks: true,
+    gfm: true,
+  });
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  sanitizeFragment(template.content);
+  element.replaceChildren(template.content.cloneNode(true));
+  renderInlineMath(element);
+}
 
 function setStatus(status) {
   elements.status.textContent = status;
@@ -72,11 +154,12 @@ function addMessage(message) {
   wrapper.dataset.messageId = message.id;
   const bubble = document.createElement("div");
   bubble.className = "message-bubble";
-  bubble.textContent = message.text;
+  const node = { wrapper, bubble, raw: message.text };
+  renderRichText(bubble, node.raw);
   wrapper.append(bubble);
   elements.messages.append(wrapper);
   elements.messages.scrollTop = elements.messages.scrollHeight;
-  return { wrapper, bubble };
+  return node;
 }
 
 function renderSession(view) {
@@ -108,8 +191,19 @@ function updateAssistant(event) {
     node.wrapper.classList.add("commentary");
   }
   if (typeof event.delta === "string") {
-    node.bubble.textContent += event.delta;
+    node.raw += event.delta;
+    renderRichText(node.bubble, node.raw);
     elements.messages.scrollTop = elements.messages.scrollHeight;
+  }
+}
+
+function updatePromptPreview() {
+  const source = elements.prompt.value.trim();
+  elements.promptPreview.hidden = source === "";
+  if (source !== "") {
+    renderRichText(elements.promptPreview, source);
+  } else {
+    elements.promptPreview.replaceChildren();
   }
 }
 
@@ -196,6 +290,7 @@ async function sendPrompt(event) {
   elements.prompt.disabled = true;
   addMessage({ id: `local-user-${Date.now()}`, role: "user", text: prompt });
   elements.prompt.value = "";
+  updatePromptPreview();
   elements.log.replaceChildren();
   setStatus("in_progress");
   try {
@@ -246,6 +341,7 @@ elements.prompt.addEventListener("keydown", (event) => {
     elements.composer.requestSubmit();
   }
 });
+elements.prompt.addEventListener("input", updatePromptPreview);
 
 async function boot() {
   try {

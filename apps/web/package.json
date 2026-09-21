@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-public.mjs",
+    "build": "tsc -p tsconfig.json && node scripts/copy-public.mjs && node scripts/bundle-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node --use-env-proxy dist/server.js"
   },
@@ -13,6 +13,11 @@
     "@mas-chat/protocol": "workspace:*",
     "@mas-chat/runtime": "workspace:*",
     "@mas-chat/storage": "workspace:*",
+    "katex": "^0.16.47",
+    "marked": "^15.0.12",
     "openai": "^7.20.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
   }
 }

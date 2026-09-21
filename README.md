@@ -67,7 +67,7 @@ pnpm web
 # 可用 MAS_CHAT_WEB_HOST / MAS_CHAT_WEB_PORT 覆盖监听地址和端口
 ```
 
-当前 Web API 只覆盖建会话、读取脱敏会话投影、发送 turn、attach 和 cancel。视觉、Markdown 渲染、会话列表和设置页暂不属于初次搭建范围，等实际使用反馈后再决定。
+当前 Web API 只覆盖建会话、列出及读取脱敏会话投影、发送 turn、attach 和 cancel。消息与输入预览支持 Markdown 和 inline LaTeX；设置页、主题系统与更复杂的视觉设计仍等实际使用反馈后再决定。
 
 ## 配置
 

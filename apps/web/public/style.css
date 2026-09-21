@@ -32,7 +32,7 @@ h1 { margin: 0; font-size: 22px; font-weight: 650; }
 .message { margin: 18px 0; display: flex; flex-direction: column; gap: 6px; }
 .message.user { align-items: flex-end; }
 .message.assistant { align-items: flex-start; }
-.message-bubble { max-width: min(760px, 92%); padding: 13px 15px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.62; }
+.message-bubble { max-width: min(760px, 92%); padding: 13px 15px; border-radius: 12px; white-space: normal; overflow-wrap: anywhere; line-height: 1.62; }
 .user .message-bubble { background: #293044; color: #eef0fa; }
 .assistant .message-bubble { background: var(--panel); border: 1px solid var(--border); }
 .assistant.commentary .message-bubble { color: #c0c5d1; background: transparent; border-color: transparent; padding-left: 0; }
@@ -46,6 +46,16 @@ h1 { margin: 0; font-size: 22px; font-weight: 650; }
 .composer { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); padding: 10px; box-shadow: 0 10px 35px #0003; }
 textarea { width: 100%; resize: vertical; min-height: 72px; border: 0; outline: 0; background: transparent; color: #f0f1f4; line-height: 1.5; }
 textarea::placeholder { color: #747b89; }
+.prompt-preview { margin: 8px 0 2px; padding: 9px 10px; border-top: 1px solid var(--border); color: #cfd4df; line-height: 1.55; }
+.prompt-preview:empty { display: none; }
+.message-bubble p, .prompt-preview p { margin: 0 0 .8em; }
+.message-bubble p:last-child, .prompt-preview p:last-child { margin-bottom: 0; }
+.message-bubble pre, .prompt-preview pre { overflow-x: auto; padding: 10px; border-radius: 7px; background: #101218; }
+.message-bubble code, .prompt-preview code { padding: 1px 4px; border-radius: 4px; background: #101218; }
+.message-bubble pre code, .prompt-preview pre code { padding: 0; background: transparent; }
+.message-bubble blockquote, .prompt-preview blockquote { margin: .5em 0; padding-left: 12px; border-left: 3px solid #515a70; color: #b6bdcc; }
+.message-bubble table, .prompt-preview table { border-collapse: collapse; }
+.message-bubble th, .message-bubble td, .prompt-preview th, .prompt-preview td { padding: 5px 8px; border: 1px solid var(--border); }
 .composer-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .muted { color: var(--muted); font-size: 12px; }
 @media (max-width: 600px) {

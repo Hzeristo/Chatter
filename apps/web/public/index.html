@@ -6,6 +6,7 @@
     <meta name="theme-color" content="#111318" />
     <title>MAS Chat</title>
     <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
   </head>
   <body>
     <div class="shell">
@@ -38,6 +39,7 @@
 
         <form id="composer" class="composer">
           <textarea id="prompt" rows="3" placeholder="输入消息……" autocomplete="off"></textarea>
+          <div id="prompt-preview" class="prompt-preview" hidden></div>
           <div class="composer-footer">
             <span id="session-label" class="muted">准备会话中</span>
             <button id="send" class="button primary" type="submit">发送</button>

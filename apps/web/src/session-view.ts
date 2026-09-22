@@ -1,6 +1,5 @@
 import type {
   JournalRecord,
-  JsonObject,
   OpenAINativeItem,
   RunStatus,
   SessionMetadata,
@@ -32,6 +31,7 @@ export interface SessionMessageView {
   versions?: TurnVersionView[];
   versionIndex?: number;
   retryable?: boolean;
+  forkable?: boolean;
 }
 
 export interface SessionView {
@@ -224,6 +224,8 @@ export function createSessionView(
       retryable:
         metadata.activeTurnId === undefined ||
         (!locallyActive && metadata.activeTurnId === turn.input.turnId),
+      forkable:
+        metadata.activeTurnId === undefined && turn.status === "completed",
     };
     messages.push(userMessage);
 
@@ -289,18 +291,5 @@ export function createSessionView(
       ? {}
       : { responseId: metadata.responseId }),
     ...(recovery === undefined ? {} : { recovery }),
-  };
-}
-
-export function safeError(error: unknown): JsonObject {
-  if (!(error instanceof Error)) {
-    return { name: "UnknownError", message: String(error) };
-  }
-  const details = error as Error & { code?: unknown; status?: unknown };
-  return {
-    name: error.name,
-    message: error.message,
-    ...(typeof details.code === "string" ? { code: details.code } : {}),
-    ...(typeof details.status === "number" ? { status: details.status } : {}),
   };
 }

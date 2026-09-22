@@ -3,7 +3,7 @@
 状态：Accepted
 
 日期：2026-09-20
-最近更新：2026-09-21（强制 `store: false`；增加全局 foreground fallback；锁定网页端式回答目标；增加 session following instruction；增加 session 内 turn 分支与重试）
+最近更新：2026-09-22（明确 `sequence_number` 允许稀疏；配置从客户端入口独立）
 
 ## 1. 产品目标
 
@@ -47,7 +47,7 @@ Base developer prompt 的目标是复刻网页端的回答轨迹，而不是建�
 | 模型 | 默认 `gpt-6-astra`，允许配置 |
 | 推理 | `reasoning.effort: "max"`，`reasoning.summary: "auto"` |
 | 长任务 | 优先 Responses `background: true` + `stream: true`；可全局启用窄范围 foreground fallback |
-| 断线恢复 | Background 持久化 `response_id`、`sequence_number` 并以 `starting_after` 重新附着；foreground 不可恢复 |
+| 断线恢复 | 服务 owner 丢失时，Background 持久化 `response_id`、`sequence_number` 并以 `starting_after` 显式重新附着；当前流错误或无终态断流直接失败 |
 | 会话延续 | 强制 `store: false`；本地保存并原样重放完整 native input/output item history |
 | 工具 | 第一阶段仅启用 OpenAI hosted tools；默认允许 `web_search`，`code_interpreter` 显式开启 |
 | 本地状态 | append-only JSONL 事件日志 + 原子写入的会话元数据 JSON |
@@ -63,14 +63,13 @@ UI 最终可能是终端、Web 或桌面应用。TypeScript 可以在这些界�
 ## 5. 组件边界
 
 ```text
-CLI / future UI
+CLI / Web UI
       │ commands + subscriptions
       ▼
-Application service
-      │
-      ├──────────────► Session store
-      │                 metadata.json
-      │                 events.jsonl
+SessionService ───────► RunRegistry
+      │                  process-local in-flight ownership
+      ├──────────────► SessionStore
+      │                 metadata.json + events.jsonl
       ▼
 RunController
       │ create / attach / cancel / retrieve
@@ -96,10 +95,20 @@ Event reducer ───────► normalized UI events
 
 1. 创建 background streaming Response；若全局策略允许且端点以 400 明确拒绝 `background`，将该未创建的 turn 记为 abort，并用新 foreground turn 重试一次；
 2. 在事件交付 UI 前落盘游标；
-3. 连接中断后从最后确认的 `sequence_number` 恢复；
-4. 过滤重复事件；
+3. 当前流若收到上游 `type: "error"`、transport 抛出 streaming error，或在 terminal event 前结束，则记录 `failed` 并结束，不尝试重新附着；服务 owner 丢失后的显式恢复仍从最后确认的 `sequence_number` 开始；
+4. 过滤重复事件；`sequence_number` 是非负、可比较的恢复游标，只要求向前推进，允许 provider 产生天然稀疏的序号，不要求必须等于前一个序号加一；
 5. 区分正常完成、失败、不完整和取消；
 6. 暴露取消与重新附着，而不执行产品级 agent 编排。
+
+### `application`
+
+`SessionService` 是唯一的 session 用例层，负责 continue、retry、edit、explicit fork、attach、cancel 和启动恢复的顺序编排。它不解析 HTTP、环境变量或配置枚举，也不重复 storage/runtime 已有的机械校验。`RunRegistry` 只表达当前 service 进程正在消费哪些 session；它不被当成跨进程存活探针。
+
+每个 CLI 命令或 Web 服务实例必须先取得 data directory 的单写者租约。Web 只在取得租约后、开始监听前处理上一 owner 遗留的不可恢复 turn。读取和列出 session 使用纯 journal projection，不触发恢复、失败转换或 metadata 修复。
+
+### `config`
+
+环境和 `.env` 只在 composition root 解析为显式 `MasChatConfig` 与 `RunPolicy`。API key 只进入 transport 构造；运行策略通过 application service 流入每次 turn，并以实际 request snapshot 写入 journal。Web 不依赖 CLI 模块。
 
 ### `storage`
 
@@ -112,6 +121,8 @@ Event reducer ───────► normalized UI events
 ```
 
 JSONL 是 append-only write-ahead journal，保留四类记录：新 turn 的原生 input items、Responses 原始流事件、terminal Response 的完整 output items，以及在创建远端 Response 前失败的本地 abort。它既支持协议升级、故障复现和 UI 重新投影，也能重建下一轮 API 输入。元数据使用临时文件加原子 rename 写入；journal 比 metadata 更新而 metadata 尚未更新时，以 journal 重建游标。需要全文搜索或大量会话后，再以 SQLite 建立可重建索引；SQLite 不成为初始正确性的依赖。
+
+命令路径可以修复落后的 metadata cache；inspect/list 路径直接从 journal 派生快照且不写盘。orphan 判定不得隐藏在读取路径中。
 
 每个新 `turn.input` 记录显式 lineage：`parentTurnId` 指向所选对话路径的上一轮，retry/edit 以 fork metadata 指向来源 turn。旧 journal 不重写；缺少 lineage 的旧 turn 按 journal 顺序连接到当时最近成功完成的 turn。一个 session 因此可以形成 turn tree，但下一轮请求只重放从根到所选父节点的单一路径。失败、截断、incomplete 和 cancelled turn 可保留并展示；继续输入时保留这些 turn 的 user input，但其 partial/terminal assistant output 绝不进入新请求的 replay history。
 
@@ -169,18 +180,22 @@ UI 可以改变外观，但不得丢弃这些语义边界。
 
 ## 8. 恢复算法
 
-1. 每次接收事件，验证 `response_id` 与单调 `sequence_number`；
+1. 每次接收事件，验证 `response_id` 与非负、单调前进的 `sequence_number`；序号允许稀疏，不把 `received > last + 1` 单独视为协议错误；
 2. 原始事件追加到 JSONL 并完成 flush；
 3. 原子更新 `lastSequenceNumber`；
 4. reducer 生成 UI 事件；
-5. 连接中断时通过官方 SDK `responses.retrieve(id, { stream: true, starting_after: N })` 重新附着；
-6. 对 `sequence_number <= N` 的重复事件执行幂等丢弃；
+5. 服务 owner 丢失且 turn 仍可恢复时，通过官方 SDK `responses.retrieve(id, { stream: true, starting_after: N })` 显式重新附着；当前消费链路的流错误或无终态结束不走此路径；
+6. 对 `sequence_number <= N` 的重复或回放事件执行幂等丢弃；对大于 `N` 的事件按 provider 给出的序号推进游标；
 7. 收到 terminal event 后，在向 UI 交付终态前保存完整 `response.output`；取消 API 返回的最终 Response 以本地 terminal snapshot 落盘，不伪造 SSE sequence；
 8. 下一轮从所有已封存 turn 重建 native item history；未完成或在远端创建前 abort 的 turn 不进入历史。
 
-Foreground fallback 仍按相同顺序落盘 SSE 和 terminal output，但连接中断即将 turn 标记为本地失败，不允许 attach；同步 Response 的取消语义是终止当前连接，因此另一个 CLI 进程不得调用 background cancel endpoint 并伪装成功。
+远端 Responses create/retrieve/stream/cancel 返回明确 HTTP 4xx/5xx、stream transport 抛出异常、收到上游 `type: "error"`，或 stream 在 terminal event 前结束时，当前 turn 都记录为 `failed` 并结束本次执行；不得把这类 provider error 留在 `queued/in_progress`，也不得把失败的 attach 重试解释成新的生成。只有服务 owner 丢失且尚未消费当前 background stream 时，带 response ID 的 background turn 才可由显式 attach 恢复。
 
-Web 服务维护进程内 active-run registry，用来区分“页面连接已断但服务仍在消费”与真正失去执行所有者的 turn。服务重启后仍显示 `queued/in_progress` 的 foreground turn 会被 journal 为 orphan failure；background turn 仍优先 attach，但尚未持久化 response ID 的 background turn 同样不可恢复并会明确失败。用户重试会在同一 session 中创建 sibling turn，复用原 user input 和原 turn 的父节点；若来源 background response 仍可恢复，则先尝试服务端 cancel 并持久化其真实 terminal 状态。兼容端点不支持或未能完成 cancel 时，journal 会明确记录本地 supersede 及 cancel error，再允许 sibling retry；此时旧远端 response 可能继续运行。已落盘的 partial assistant output 只用于展示。
+Foreground fallback 仍按相同顺序落盘 SSE 和 terminal output；任何流错误或无终态结束都将 turn 标记为本地失败，不允许 attach；同步 Response 的取消语义是终止当前连接，因此另一个 CLI 进程不得调用 background cancel endpoint 并伪装成功。
+
+Application service 维护进程内 run registry，用来区分“页面连接已断但服务仍在消费”与当前实例没有消费。跨进程排他性由 data-directory lease 保证，因此只有取得租约的新 owner 才能在启动阶段处理遗留状态：foreground turn 和没有 response ID 的 background turn记为 owner-lost failure；带 response ID 的 background turn保持 attachable。GET/list 不做 reconciliation。用户重试会在同一 session 中创建 sibling turn，复用原 user input 和原 turn 的父节点；若来源 background response 仍可恢复，则必须成功执行服务端 cancel 并持久化真实 terminal 状态后才能创建 sibling，不以吞掉 cancel 失败的旁路继续运行。已落盘的 partial assistant output 只用于展示。
+
+停止生成沿同一条所有权链路传播：Web 先请求 application 的 cancel 用例；服务层在本地 turn 收敛为 `cancelled` 或 `failed` 后 abort 当前 run handle；controller 将 `AbortSignal` 传给 Responses transport，再由官方 SDK 中止 create/retrieve stream。这样远端 cancel 的真实 terminal 状态与本地消费者的结束保持一致，foreground 或远端 cancel 失败也不会留下继续 attach 的 active turn。
 
 当前锁定的官方 `openai` JavaScript SDK 已直接暴露 streaming retrieve 与 `starting_after`。runtime 仍保留独立 SSE parser，用于协议测试和 SDK/REST 能力发生短期错位时的薄 fallback，不建立第二套 provider abstraction。
 
@@ -221,6 +236,7 @@ Web 服务维护进程内 active-run registry，用来区分“页面连接已�
 - 已增加一个只绑定本地地址的原生 Web 壳，作为 protocol consumer；
 - UI 只能消费 protocol，不得重新实现 Responses 状态机；
 - 已支持在 user message 下重试/重新生成或原位编辑后重试，并在同一 session 内切换 sibling turn 版本；
+- 已支持从完成的历史 turn 显式 fork，并记录 `fork.kind: "explicit"`；
 - 视觉、Markdown、会话列表、设置编辑和多用户部署暂不预设，避免在真实交互反馈前过度设计。
 
 ## 10. 验收标准
@@ -231,9 +247,10 @@ Web 服务维护进程内 active-run registry，用来区分“页面连接已�
 - reasoning summary 在生成时可见；
 - hosted tool 状态与来源可见；
 - commentary 与最终答案不会互相覆盖；
-- 客户端断开至少一次后可从游标恢复；
+- 服务 owner 丢失且 background response 已持久化 `response_id` 时可显式从游标恢复；streaming error 或无终态断流后的 turn 必须保持 `failed`，不可再次 attach；
 - 恢复后文本和工具事件无重复、无缺失；
 - 可取消 queued 或 in-progress 任务；
+- Web 与 CLI 都能显式停止当前生成；停止失败的远端 cancel 也会将本地 turn 收敛为 `failed`，并保留 cancel error；
 - `store: false` 可从本地原生 item history 构造第二轮请求，且不包含 `previous_response_id`；
 - 30 分钟任务完成后仍能恢复并读取最终结果；
 - 默认运行不读取本地仓库、不执行本地命令、不创建子代理；

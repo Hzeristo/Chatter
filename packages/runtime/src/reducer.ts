@@ -162,12 +162,6 @@ export function reduceResponseEvent(
   if (sequenceNumber <= state.lastSequenceNumber) {
     return { state, normalized: [], duplicate: true };
   }
-  if (
-    state.lastSequenceNumber >= 0 &&
-    sequenceNumber !== state.lastSequenceNumber + 1
-  ) {
-    throw new ResponseSequenceError(state.lastSequenceNumber + 1, sequenceNumber);
-  }
 
   const type = stringValue(event.type) ?? "unknown";
   const incomingResponseId = responseIdFromEvent(event);

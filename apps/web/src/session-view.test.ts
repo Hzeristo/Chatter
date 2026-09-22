@@ -209,6 +209,7 @@ describe("web session projection", () => {
     );
     expect(retriedUser?.versions).toHaveLength(2);
     expect(retriedUser?.versionIndex).toBe(1);
+    expect(retriedUser?.forkable).toBe(true);
   });
 
   it("projects an edited prompt as another sibling version", () => {

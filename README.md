@@ -2,7 +2,7 @@
 
 本仓库用于实现一个 OpenAI-native 的本地长任务聊天客户端：保留 ChatGPT Web 的长程推理、推理摘要、托管工具进度和最终答案体验，但不引入 Codex 式仓库扫描、补丁、测试、子代理与权限编排 harness。
 
-当前状态：协议、stateless journal、事件 reducer、断线恢复控制器、集中配置和最小 CLI 已实现。真实 API 烟测已在 foreground fallback 下完成；background 恢复链路仍需使用支持该参数的端点验证。
+当前状态：协议、stateless journal、事件 reducer、断线恢复控制器、application service、集中配置和 CLI/Web 客户端已实现。真实 API 烟测已在 foreground fallback 下完成；background 恢复链路仍需使用支持该参数的端点验证。
 
 ## 已确定的方向
 
@@ -24,7 +24,10 @@
 ```text
 apps/
   cli/                 最小参考客户端，用于验证长任务体验
+  web/                 本地 HTTP/SSE 适配层与浏览器 UI
 packages/
+  application/         session 命令、运行所有权与启动恢复
+  config/              环境配置到显式运行策略的数据流
   runtime/             RunController、Responses transport、事件归一化
   protocol/            UI 无关的事件和命令类型
   storage/             本地运行日志、会话元数据和恢复游标
@@ -67,7 +70,9 @@ pnpm web
 # 可用 MAS_CHAT_WEB_HOST / MAS_CHAT_WEB_PORT 覆盖监听地址和端口
 ```
 
-当前 Web API 覆盖建会话、列出及读取脱敏会话投影、发送 turn、attach、cancel、retry 和 edit。消息与输入预览支持 Markdown 和 inline LaTeX；重新生成或原位编辑后重试都会在同一 session 内创建 turn 分支，失败或截断回答不会进入新分支的 replay history。设置页、主题系统与更复杂的视觉设计仍等实际使用反馈后再决定。
+当前 Web API 覆盖建会话、列出及读取脱敏会话投影、发送 turn、attach、cancel、retry、edit 和显式 fork。消息与输入预览支持 Markdown 和 inline LaTeX；重新生成、原位编辑和从历史 turn 分支都会在同一 session 内形成明确的 turn lineage，失败或截断回答不会进入新分支的 replay history。远端 API 的 4xx/5xx、streaming error、`type: "error"` 事件以及没有 terminal event 就结束的流都会将当前 turn 终结为 failed，不会继续伪装成可 attach 的进行中响应；Web composer 提供停止生成入口。设置页、主题系统与更复杂的视觉设计仍等实际使用反馈后再决定。
+
+CLI、Web 和测试入口对同一 data directory 使用进程级单写者租约。Web 在取得租约后、开始监听前统一处理上一实例遗留的不可恢复 turn；读取和列出 session 只从 journal 投影，不改变 journal 或 metadata。因而 Web 运行期间不能再用 CLI 写入同一 data directory。
 
 ## 配置
 
@@ -99,7 +104,7 @@ CLI 会静态读取当前工作目录的 `.env`，无需 `dotenv` 包。项目�
 | `MAS_CHAT_DEVELOPER_PROMPT` | 内置短 prompt | 每个 session 仅在首轮 `instructions` 中发送一次 |
 | `MAS_CHAT_SESSION_FOLLOWING_INSTRUCTION` | 内置短 continuation cue | 每轮作为请求级 `instructions` 注入；后续轮不再拼接 base prompt |
 
-替代 `OPENAI_BASE_URL` 至少必须支持 streaming Responses。若还支持 background streaming create、带 `starting_after` 的 streaming retrieve 和 cancel，客户端可提供完整长任务恢复；否则在全局 fallback 为 `on_unsupported` 时降级为不可恢复、不可通过服务端 API 取消的 foreground stream。仅兼容 Chat Completions 的代理仍不能运行本客户端。
+替代 `OPENAI_BASE_URL` 至少必须支持 streaming Responses。事件的 `sequence_number` 作为恢复游标使用，只要求非负且向前推进，允许 provider 使用稀疏序号；若还支持 background streaming create、带 `starting_after` 的 streaming retrieve 和 cancel，客户端可提供完整长任务恢复；否则在全局 fallback 为 `on_unsupported` 时降级为不可恢复、不可通过服务端 API 取消的 foreground stream。仅兼容 Chat Completions 的代理仍不能运行本客户端。
 
 标准 `pnpm cli` 与 `pnpm smoke:api` 入口使用 Node 24 的 `--use-env-proxy`，因此会在系统设置 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY` 时自动遵循这些代理变量；未设置代理时仍直接连接。
 

@@ -53,7 +53,11 @@ export interface SessionCreatedRecord extends JournalRecordBase {
   kind: "session.created";
 }
 
-export type TurnForkKind = "edit" | "retry" | "transport_fallback";
+export type TurnForkKind =
+  | "edit"
+  | "explicit"
+  | "retry"
+  | "transport_fallback";
 
 export interface TurnForkMetadata extends JsonObject {
   kind: TurnForkKind;

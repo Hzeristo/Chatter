@@ -10,10 +10,12 @@ export interface ResponsesTransport {
   cancel(responseId: string): Promise<JsonObject>;
   create(
     request: ResponseCreateParamsStreaming,
+    signal?: AbortSignal,
   ): Promise<AsyncIterable<JsonObject>>;
   resume(
     responseId: string,
     startingAfter: number,
+    signal?: AbortSignal,
   ): Promise<AsyncIterable<JsonObject>>;
 }
 
@@ -44,19 +46,25 @@ export class OpenAIResponsesTransport implements ResponsesTransport {
 
   async create(
     request: ResponseCreateParamsStreaming,
+    signal?: AbortSignal,
   ): Promise<AsyncIterable<JsonObject>> {
-    const stream = await this.#client.responses.create(request);
+    const stream = await this.#client.responses.create(request, { signal });
     return mapStream(stream);
   }
 
   async resume(
     responseId: string,
     startingAfter: number,
+    signal?: AbortSignal,
   ): Promise<AsyncIterable<JsonObject>> {
-    const stream = await this.#client.responses.retrieve(responseId, {
-      stream: true,
-      starting_after: startingAfter,
-    });
+    const stream = await this.#client.responses.retrieve(
+      responseId,
+      {
+        stream: true,
+        starting_after: startingAfter,
+      },
+      { signal },
+    );
     return mapStream(stream);
   }
 }

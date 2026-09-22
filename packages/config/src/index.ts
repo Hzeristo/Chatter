@@ -47,6 +47,11 @@ export interface LoadConfigOptions {
   envFileName?: string;
 }
 
+export type RunPolicy = Omit<
+  StartRunOptions,
+  "fork" | "parentTurnId" | "sessionId"
+>;
+
 export class ConfigError extends Error {
   constructor(message: string, cause?: unknown) {
     super(message, cause === undefined ? undefined : { cause });
@@ -159,9 +164,6 @@ export function loadConfig(options: LoadConfigOptions = {}): MasChatConfig {
   const envFilePath = path.resolve(cwd, options.envFileName ?? ".env");
   const environment = definedEnvironment(options.env ?? process.env);
   const dotEnv = loadDotEnv(envFilePath);
-
-  // This precedence is a deliberate product decision: the static project file
-  // overrides machine/process environment values with the same name.
   const values = { ...environment, ...dotEnv };
   const apiKey = optionalNonEmpty(values, "OPENAI_API_KEY");
   const dotEnvDefinesApiKey = Object.hasOwn(dotEnv, "OPENAI_API_KEY");
@@ -235,9 +237,7 @@ export function requireApiKey(config: MasChatConfig): string {
   return config.apiKey;
 }
 
-export function requestOptionsFromConfig(
-  config: MasChatConfig,
-): Omit<StartRunOptions, "sessionId"> {
+export function runPolicyFromConfig(config: MasChatConfig): RunPolicy {
   return {
     backgroundFallback: config.backgroundFallback,
     model: config.model,

@@ -29,6 +29,7 @@ OpenAI-hosted tools may be enabled explicitly per run. Local tools require a sep
 - Prefer background streaming. Foreground fallback is allowed only after an explicit HTTP 400 unsupported-`background` error and only when the global policy enables it; never fallback for authentication, rate-limit, model, or network failures.
 - Journal the actual execution mode. Foreground runs are not attachable after disconnect and cannot use the server-side cancel endpoint; do not represent them as durable background runs.
 - Persist the response ID and highest acknowledged sequence number before acknowledging an event to the UI.
+- Treat `sequence_number` as a non-negative monotonic recovery cursor; provider event numbers may be sparse, so a gap is not by itself a protocol error. Ignore duplicate or replayed events idempotently.
 - Event replay must be idempotent. Duplicate events after reconnect must not duplicate visible text or tool state.
 - Keep the developer prompt short, versioned, visible, and user-editable.
 - Treat `response.completed`, `response.failed`, `response.incomplete`, and `response.cancelled` as distinct terminal outcomes.

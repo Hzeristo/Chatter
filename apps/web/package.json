@@ -9,7 +9,8 @@
     "start": "node --use-env-proxy dist/server.js"
   },
   "dependencies": {
-    "@mas-chat/cli": "workspace:*",
+    "@mas-chat/application": "workspace:*",
+    "@mas-chat/config": "workspace:*",
     "@mas-chat/protocol": "workspace:*",
     "@mas-chat/runtime": "workspace:*",
     "@mas-chat/storage": "workspace:*",

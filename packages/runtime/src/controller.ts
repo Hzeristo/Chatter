@@ -76,13 +76,13 @@ export interface StartRunOptions extends StatelessRequestOptions {
   fork?: TurnForkMetadata;
   /** `null` starts a new root branch; omitted continues the latest completed turn. */
   parentTurnId?: string | null;
+  signal?: AbortSignal;
   sessionId: string;
 }
 
 export type BackgroundFallbackPolicy = "never" | "on_unsupported";
 
 interface PreparedTurn {
-  background: boolean;
   stream: AsyncIterable<JsonObject>;
   turnId: string;
 }
@@ -205,6 +205,7 @@ export class RunController {
         true,
         lineage,
         backgroundTurnId,
+        options.signal,
       );
     } catch (error) {
       if (
@@ -227,6 +228,7 @@ export class RunController {
           },
         },
         this.#turnId(),
+        options.signal,
       );
     }
 
@@ -235,11 +237,13 @@ export class RunController {
       prepared.turnId,
       prepared.stream,
       createResponseProjection(),
-      prepared.background,
     );
   }
 
-  async *attach(sessionId: string): AsyncGenerator<NormalizedEvent> {
+  async *attach(
+    sessionId: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<NormalizedEvent> {
     const metadata = await this.#store.loadMetadata(sessionId);
     if (metadata.activeTurnId === undefined || metadata.responseId === undefined) {
       throw new Error(`Session ${sessionId} has no resumable response`);
@@ -279,13 +283,13 @@ export class RunController {
     const stream = await this.#transport.resume(
       metadata.responseId,
       metadata.lastSequenceNumber,
+      signal,
     );
     yield* this.consume(
       sessionId,
       metadata.activeTurnId,
       stream,
       projection,
-      true,
     );
   }
 
@@ -333,7 +337,6 @@ export class RunController {
     turnId: string,
     stream: AsyncIterable<JsonObject>,
     initialProjection: ReturnType<typeof createResponseProjection>,
-    background: boolean,
   ): AsyncGenerator<NormalizedEvent> {
     let projection = initialProjection;
     let sawTerminal = false;
@@ -373,6 +376,16 @@ export class RunController {
           sawTerminal = true;
         }
 
+        if (event.type === "error") {
+          const message =
+            typeof event.message === "string"
+              ? event.message
+              : "The response stream emitted an error event";
+          const streamError = new Error(`Response stream error: ${message}`);
+          streamError.name = "ResponseStreamError";
+          throw streamError;
+        }
+
         for (const normalized of result.normalized) {
           yield normalized;
         }
@@ -382,7 +395,8 @@ export class RunController {
         }
       }
     } catch (error) {
-      if (!background) {
+      const metadata = await this.#store.loadMetadata(sessionId);
+      if (metadata.activeTurnId === turnId) {
         await this.#store.failTurn(sessionId, turnId, errorRecord(error));
       }
       throw error;
@@ -392,7 +406,8 @@ export class RunController {
       projection.lastSequenceNumber,
       projection.responseId,
     );
-    if (!background) {
+    const metadata = await this.#store.loadMetadata(sessionId);
+    if (metadata.activeTurnId === turnId) {
       await this.#store.failTurn(sessionId, turnId, errorRecord(error));
     }
     throw error;
@@ -406,6 +421,7 @@ export class RunController {
     background: boolean,
     lineage: TurnLineage,
     turnId: string,
+    signal?: AbortSignal,
   ): Promise<PreparedTurn> {
     const request = buildStatelessResponseRequest(
       history,
@@ -423,12 +439,14 @@ export class RunController {
 
     try {
       return {
-        background,
-        stream: await this.#transport.create(request),
+        stream: await this.#transport.create(request, signal),
         turnId,
       };
     } catch (error) {
-      await this.#store.abortTurn(sessionId, turnId, errorRecord(error));
+      const metadata = await this.#store.loadMetadata(sessionId);
+      if (metadata.activeTurnId === turnId) {
+        await this.#store.abortTurn(sessionId, turnId, errorRecord(error));
+      }
       throw error;
     }
   }

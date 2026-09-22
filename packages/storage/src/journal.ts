@@ -28,7 +28,6 @@ import {
 import {
   InvalidSessionIdError,
   JournalCorruptionError,
-  SequenceGapError,
   SessionStateError,
 } from "./errors.js";
 
@@ -225,6 +224,11 @@ export interface RecordResponseEventResult {
   metadata: SessionMetadata;
 }
 
+export interface StoredSessionSnapshot {
+  metadata: SessionMetadata;
+  records: JournalRecord[];
+}
+
 export class SessionStore {
   readonly rootDirectory: string;
   readonly sessionsDirectory: string;
@@ -356,12 +360,6 @@ export class SessionStore {
       const sequence = sequenceNumber as number;
       if (sequence <= current.lastSequenceNumber) {
         return { duplicate: true, metadata: current };
-      }
-      if (
-        current.lastSequenceNumber >= 0 &&
-        sequence !== current.lastSequenceNumber + 1
-      ) {
-        throw new SequenceGapError(current.lastSequenceNumber + 1, sequence);
       }
 
       const at = now.toISOString();
@@ -551,7 +549,18 @@ export class SessionStore {
 
   async readJournal(sessionId: string): Promise<JournalRecord[]> {
     assertSafeId(sessionId);
-    return this.readJournalUnlocked(sessionId);
+    return this.withLock(sessionId, () => this.readJournalUnlocked(sessionId));
+  }
+
+  async inspectSession(sessionId: string): Promise<StoredSessionSnapshot> {
+    assertSafeId(sessionId);
+    return this.withLock(sessionId, async () => {
+      const records = await this.readJournalUnlocked(sessionId);
+      return {
+        metadata: rebuildMetadata(sessionId, records),
+        records,
+      };
+    });
   }
 
   /**
@@ -559,17 +568,21 @@ export class SessionStore {
    * caller can load a specific journal when it needs a conversation view.
    */
   async listSessions(): Promise<SessionMetadata[]> {
+    return (await this.listSessionSnapshots()).map((snapshot) => snapshot.metadata);
+  }
+
+  async listSessionSnapshots(): Promise<StoredSessionSnapshot[]> {
     await mkdir(this.sessionsDirectory, { recursive: true });
     const entries = await readdir(this.sessionsDirectory, { withFileTypes: true });
-    const sessions: SessionMetadata[] = [];
+    const sessions: StoredSessionSnapshot[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || !SAFE_ID.test(entry.name)) {
         continue;
       }
-      sessions.push(await this.loadMetadata(entry.name));
+      sessions.push(await this.inspectSession(entry.name));
     }
     return sessions.sort((left, right) =>
-      right.updatedAt.localeCompare(left.updatedAt),
+      right.metadata.updatedAt.localeCompare(left.metadata.updatedAt),
     );
   }
 

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ConfigError, loadConfig, requireApiKey } from "./config.js";
+import { ConfigError, loadConfig, requireApiKey } from "./index.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -22,7 +22,7 @@ afterEach(async () => {
   );
 });
 
-describe("CLI configuration", () => {
+describe("application configuration", () => {
   it("uses .env before process environment and resolves relative data paths", async () => {
     const cwd = await temporaryDirectory();
     await writeFile(
@@ -93,7 +93,7 @@ describe("CLI configuration", () => {
     expect(() => requireApiKey(config)).toThrow(ConfigError);
   });
 
-  it("reports invalid URLs, enums, booleans, and missing keys", async () => {
+  it("reports invalid boundary values", async () => {
     const cwd = await temporaryDirectory();
     expect(() =>
       loadConfig({ cwd, env: { OPENAI_BASE_URL: "not-a-url" } }),

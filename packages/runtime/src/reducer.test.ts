@@ -57,7 +57,7 @@ describe("response event reducer", () => {
     expect(normalizedKinds.at(-1)).toBe("terminal");
   });
 
-  it("drops duplicate replay and rejects a missing sequence", async () => {
+  it("drops duplicate replay and accepts sparse sequence numbers", async () => {
     const fixture = await loadFixture();
     let state = createResponseProjection();
 
@@ -69,9 +69,19 @@ describe("response event reducer", () => {
     expect(duplicate.duplicate).toBe(true);
     expect(duplicate.state).toBe(state);
 
-    expect(() => reduceResponseEvent(state, fixture[11]!)).toThrow(
-      ResponseSequenceError,
-    );
+    const sparse = reduceResponseEvent(state, fixture[11]!);
+    expect(sparse.duplicate).toBe(false);
+    expect(sparse.state.lastSequenceNumber).toBe(11);
+  });
+
+  it("rejects invalid sequence numbers", () => {
+    expect(() =>
+      reduceResponseEvent(createResponseProjection(), {
+        type: "response.created",
+        sequence_number: -1,
+        response: { id: "resp_invalid", status: "queued", output: [] },
+      }),
+    ).toThrow(ResponseSequenceError);
   });
 
   it.each([

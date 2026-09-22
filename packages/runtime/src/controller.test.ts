@@ -50,6 +50,14 @@ async function* events(values: JsonObject[]): AsyncGenerator<JsonObject> {
   yield* values;
 }
 
+async function* eventsThenError(
+  values: JsonObject[],
+  error: Error,
+): AsyncGenerator<JsonObject> {
+  yield* values;
+  throw error;
+}
+
 async function collect(
   stream: AsyncIterable<NormalizedEvent>,
 ): Promise<NormalizedEvent[]> {
@@ -64,6 +72,8 @@ class FakeTransport implements ResponsesTransport {
   readonly createEvents: JsonObject[];
   readonly resumeEvents: JsonObject[];
   readonly createError: Error | undefined;
+  readonly resumeError: Error | undefined;
+  readonly streamError: Error | undefined;
   readonly rejectBackground: boolean;
   readonly requests: ResponseCreateParamsStreaming[] = [];
   readonly resumeCalls: Array<{ responseId: string; startingAfter: number }> = [];
@@ -77,11 +87,15 @@ class FakeTransport implements ResponsesTransport {
     createEvents?: JsonObject[];
     resumeEvents?: JsonObject[];
     createError?: Error;
+    resumeError?: Error;
+    streamError?: Error;
     rejectBackground?: boolean;
   }) {
     this.createEvents = options.createEvents ?? [];
     this.resumeEvents = options.resumeEvents ?? [];
     this.createError = options.createError;
+    this.resumeError = options.resumeError;
+    this.streamError = options.streamError;
     this.rejectBackground = options.rejectBackground ?? false;
   }
 
@@ -97,7 +111,9 @@ class FakeTransport implements ResponsesTransport {
     if (this.createError !== undefined) {
       throw this.createError;
     }
-    return events(this.createEvents);
+    return this.streamError === undefined
+      ? events(this.createEvents)
+      : eventsThenError(this.createEvents, this.streamError);
   }
 
   async cancel(_responseId: string): Promise<JsonObject> {
@@ -109,6 +125,9 @@ class FakeTransport implements ResponsesTransport {
     startingAfter: number,
   ): Promise<AsyncIterable<JsonObject>> {
     this.resumeCalls.push({ responseId, startingAfter });
+    if (this.resumeError !== undefined) {
+      throw this.resumeError;
+    }
     return events(this.resumeEvents);
   }
 }
@@ -224,12 +243,11 @@ describe("RunController", () => {
     ).toBe(false);
   });
 
-  it("keeps an interrupted response attachable and resumes after the durable cursor", async () => {
+  it("fails when a response stream ends without a terminal event", async () => {
     const store = await temporaryStore();
     const fixture = await loadFixture();
     const transport = new FakeTransport({
       createEvents: fixture.slice(0, 10),
-      resumeEvents: fixture.slice(10),
     });
     const controller = new RunController(store, transport, () => "turn-1");
     const input = [{ role: "user", content: "Question" }] as ResponseInputItem[];
@@ -240,20 +258,15 @@ describe("RunController", () => {
 
     const interrupted = await store.loadMetadata("session-1");
     expect(interrupted).toMatchObject({
-      activeTurnId: "turn-1",
       responseId: "resp_fixture",
       lastSequenceNumber: 9,
+      status: "failed",
     });
-
-    const resumed = await collect(controller.attach("session-1"));
-    expect(transport.resumeCalls).toEqual([
-      { responseId: "resp_fixture", startingAfter: 9 },
-    ]);
-    expect(resumed.at(-1)).toMatchObject({
-      kind: "terminal",
-      status: "completed",
+    expect(interrupted.activeTurnId).toBeUndefined();
+    expect((await store.readJournal("session-1")).at(-1)).toMatchObject({
+      kind: "turn.failed",
+      turnId: "turn-1",
     });
-    expect((await store.loadMetadata("session-1")).activeTurnId).toBeUndefined();
   });
 
   it("aborts a local turn when request creation fails before a response exists", async () => {
@@ -433,28 +446,145 @@ describe("RunController", () => {
     );
   });
 
+  it("commits remote HTTP stream errors as failed instead of leaving background work attachable", async () => {
+    const store = await temporaryStore();
+    const transport = new FakeTransport({
+      streamError: Object.assign(new Error("429 rate limited"), {
+        status: 429,
+      }),
+      createEvents: [
+        {
+          type: "response.created",
+          sequence_number: 0,
+          response: { id: "resp-remote-error", status: "in_progress", output: [] },
+        },
+      ],
+    });
+    const controller = new RunController(store, transport, () => "turn-remote-error");
+
+    await expect(
+      collect(
+        controller.start(
+          [{ role: "user", content: "Question" }] as ResponseInputItem[],
+          { sessionId: "session-1" },
+        ),
+      ),
+    ).rejects.toMatchObject({ status: 429 });
+
+    const metadata = await store.loadMetadata("session-1");
+    expect(metadata.status).toBe("failed");
+    expect(metadata.activeTurnId).toBeUndefined();
+    expect((await store.readJournal("session-1")).at(-1)).toMatchObject({
+      kind: "turn.failed",
+      turnId: "turn-remote-error",
+      responseId: "resp-remote-error",
+    });
+  });
+
+  it("commits non-HTTP streaming errors as failed instead of leaving background work attachable", async () => {
+    const store = await temporaryStore();
+    const transport = new FakeTransport({
+      streamError: new Error("socket closed during stream"),
+      createEvents: [
+        {
+          type: "response.created",
+          sequence_number: 0,
+          response: { id: "resp-stream-error", status: "in_progress", output: [] },
+        },
+      ],
+    });
+    const controller = new RunController(store, transport, () => "turn-stream-error");
+
+    await expect(
+      collect(
+        controller.start(
+          [{ role: "user", content: "Question" }] as ResponseInputItem[],
+          { sessionId: "session-1" },
+        ),
+      ),
+    ).rejects.toThrow("socket closed during stream");
+
+    const metadata = await store.loadMetadata("session-1");
+    expect(metadata.status).toBe("failed");
+    expect(metadata.activeTurnId).toBeUndefined();
+    expect((await store.readJournal("session-1")).at(-1)).toMatchObject({
+      kind: "turn.failed",
+      turnId: "turn-stream-error",
+      responseId: "resp-stream-error",
+    });
+  });
+
+  it("fails immediately on an upstream response stream error event", async () => {
+    const store = await temporaryStore();
+    const transport = new FakeTransport({
+      createEvents: [
+        {
+          type: "response.created",
+          sequence_number: 0,
+          response: { id: "resp-error-event", status: "in_progress", output: [] },
+        },
+        {
+          type: "error",
+          sequence_number: 1,
+          code: "server_error",
+          message: "upstream stream failed",
+          param: null,
+        },
+      ],
+    });
+    const controller = new RunController(store, transport, () => "turn-error-event");
+
+    await expect(
+      collect(
+        controller.start(
+          [{ role: "user", content: "Question" }] as ResponseInputItem[],
+          { sessionId: "session-1" },
+        ),
+      ),
+    ).rejects.toMatchObject({
+      name: "ResponseStreamError",
+      message: "Response stream error: upstream stream failed",
+    });
+
+    const metadata = await store.loadMetadata("session-1");
+    expect(metadata.status).toBe("failed");
+    expect(metadata.activeTurnId).toBeUndefined();
+    expect((await store.readJournal("session-1")).at(-1)).toMatchObject({
+      kind: "turn.failed",
+      turnId: "turn-error-event",
+      responseId: "resp-error-event",
+    });
+  });
+
   it("records cancellation as a terminal snapshot without inventing an SSE cursor", async () => {
     const store = await temporaryStore();
-    const fixture = await loadFixture();
-    const transport = new FakeTransport({ createEvents: fixture.slice(0, 2) });
+    const transport = new FakeTransport({
+      createEvents: [
+        {
+          type: "response.created",
+          sequence_number: 0,
+          response: { id: "resp_cancel", status: "in_progress", output: [] },
+        },
+      ],
+    });
     const controller = new RunController(store, transport, () => "turn-cancel");
     const input = [{ role: "user", content: "Long task" }] as ResponseInputItem[];
 
-    await expect(
-      collect(controller.start(input, { sessionId: "session-1" })),
-    ).rejects.toBeInstanceOf(StreamEndedWithoutTerminalError);
+    const stream = controller.start(input, { sessionId: "session-1" });
+    const first = await stream.next();
+    expect(first.value).toMatchObject({ kind: "lifecycle", status: "queued" });
     const before = await store.loadMetadata("session-1");
-    expect(before.lastSequenceNumber).toBe(1);
+    expect(before.lastSequenceNumber).toBe(0);
 
     const terminal = await controller.cancel("session-1");
     expect(terminal).toMatchObject({
       kind: "terminal",
       sourceType: "response.cancel",
-      sequenceNumber: 1,
+      sequenceNumber: 0,
       status: "cancelled",
     });
     const after = await store.loadMetadata("session-1");
-    expect(after.lastSequenceNumber).toBe(1);
+    expect(after.lastSequenceNumber).toBe(0);
     expect(after.status).toBe("cancelled");
     expect(after.activeTurnId).toBeUndefined();
 

@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { JsonObject, RunConfigurationSnapshot } from "@mas-chat/protocol";
 
-import { SequenceGapError } from "./errors.js";
 import { parseJournal, SessionStore } from "./journal.js";
 
 const temporaryDirectories: string[] = [];
@@ -55,6 +54,23 @@ describe("session journal", () => {
     expect(sessions[0]).toMatchObject({ status: "idle", lastSequenceNumber: -1 });
   });
 
+  it("inspects journal-derived state without repairing metadata", async () => {
+    const store = await temporaryStore();
+    await store.createSession("session-read");
+    const metadataPath = store.metadataPath("session-read");
+    const stale = JSON.parse(await readFile(metadataPath, "utf8")) as JsonObject;
+    stale.status = "failed";
+    const staleText = `${JSON.stringify(stale)}\n`;
+    await writeFile(metadataPath, staleText, "utf8");
+
+    const snapshot = await store.inspectSession("session-read");
+    const listed = await store.listSessionSnapshots();
+
+    expect(snapshot.metadata.status).toBe("idle");
+    expect(listed[0]?.metadata.status).toBe("idle");
+    expect(await readFile(metadataPath, "utf8")).toBe(staleText);
+  });
+
   it("flushes events before advancing the cursor and ignores duplicate delivery", async () => {
     const store = await temporaryStore();
     await store.createSession("session-1", new Date("2026-09-20T00:00:00Z"));
@@ -93,18 +109,19 @@ describe("session journal", () => {
     );
     expect(duplicate.duplicate).toBe(true);
 
-    await expect(
-      store.recordResponseEvent("session-1", "turn-1", "resp-1", {
-        type: "response.output_text.delta",
-        sequence_number: 3,
-        item_id: "msg",
-        output_index: 0,
-        content_index: 0,
-        delta: "gap",
-      }),
-    ).rejects.toBeInstanceOf(SequenceGapError);
-
-    await store.recordResponseEvent("session-1", "turn-1", "resp-1", events[2]!);
+    await store.recordResponseEvent("session-1", "turn-1", "resp-1", {
+      type: "response.output_text.delta",
+      sequence_number: 3,
+      item_id: "msg",
+      output_index: 0,
+      content_index: 0,
+      delta: "sparse",
+    });
+    await store.recordResponseEvent("session-1", "turn-1", "resp-1", {
+      type: "response.completed",
+      sequence_number: 5,
+      response: { id: "resp-1", status: "completed", output: [] },
+    });
     await store.recordTurnOutput(
       "session-1",
       "turn-1",
@@ -117,7 +134,7 @@ describe("session journal", () => {
     expect(metadata).toMatchObject({
       status: "completed",
       responseId: "resp-1",
-      lastSequenceNumber: 2,
+      lastSequenceNumber: 5,
     });
     expect(metadata.activeTurnId).toBeUndefined();
 
@@ -128,8 +145,15 @@ describe("session journal", () => {
       "response.event",
       "response.event",
       "response.event",
+      "response.event",
       "turn.output",
     ]);
+
+    expect(
+      records
+        .filter((record) => record.kind === "response.event")
+        .map((record) => record.sequenceNumber),
+    ).toEqual([0, 1, 3, 5]);
   });
 
   it("repairs a stale metadata cursor from the durable journal", async () => {

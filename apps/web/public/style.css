@@ -69,6 +69,8 @@ textarea::placeholder { color: #747b89; }
 .message-bubble table, .prompt-preview table { border-collapse: collapse; }
 .message-bubble th, .message-bubble td, .prompt-preview th, .prompt-preview td { padding: 5px 8px; border: 1px solid var(--border); }
 .composer-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.composer-context { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.composer-actions { display: flex; align-items: center; gap: 8px; }
 .muted { color: var(--muted); font-size: 12px; }
 @media (max-width: 600px) {
   .topbar, .conversation-wrap { padding-left: 14px; padding-right: 14px; }

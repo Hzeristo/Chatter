@@ -1,9 +1,17 @@
 #!/usr/bin/env node
 
-import { randomUUID } from "node:crypto";
-
 import OpenAI from "openai";
-import type { ResponseInputItem } from "openai/resources/responses/responses";
+
+import {
+  acquireDataDirectoryLease,
+  SessionService,
+} from "@mas-chat/application";
+import {
+  loadConfig,
+  requireApiKey,
+  runPolicyFromConfig,
+  type MasChatConfig,
+} from "@mas-chat/config";
 
 import {
   OpenAIResponsesTransport,
@@ -12,12 +20,6 @@ import {
 } from "@mas-chat/runtime";
 import { SessionStore } from "@mas-chat/storage";
 
-import {
-  loadConfig,
-  requireApiKey,
-  requestOptionsFromConfig,
-  type MasChatConfig,
-} from "./config.js";
 import { consoleWriter, renderEvent } from "./render.js";
 
 const USAGE = `MAS Chat
@@ -52,6 +54,17 @@ function apiController(
     baseURL: config.baseURL,
   });
   return new RunController(store, new OpenAIResponsesTransport(client));
+}
+
+function sessionService(
+  store: SessionStore,
+  config: MasChatConfig,
+): SessionService {
+  return new SessionService(
+    store,
+    () => apiController(store, config),
+    runPolicyFromConfig(config),
+  );
 }
 
 function printableConfig(config: MasChatConfig) {
@@ -103,62 +116,50 @@ async function main(argv: string[]): Promise<void> {
   }
 
   const store = new SessionStore(config.dataDirectory);
+  const releaseLease = await acquireDataDirectoryLease(config.dataDirectory);
+  const service = sessionService(store, config);
 
-  if (command === "new") {
-    const prompt = requireText(args, "prompt");
-    const controller = apiController(store, config);
-    const sessionId = randomUUID();
-    await store.createSession(sessionId);
-    process.stderr.write(`[session ${sessionId}]\n`);
-    const input = [{ role: "user", content: prompt }] as ResponseInputItem[];
-    await render(
-      controller.start(input, {
-        sessionId,
-        ...requestOptionsFromConfig(config),
-      }),
-    );
-    return;
-  }
-
-  if (command === "continue") {
-    const [sessionId, ...promptParts] = args;
-    if (sessionId === undefined) {
-      throw new Error("session-id is required");
+  try {
+    if (command === "new") {
+      const prompt = requireText(args, "prompt");
+      const sessionId = await service.createSession();
+      process.stderr.write(`[session ${sessionId}]\n`);
+      await render(await service.continueSession(sessionId, prompt));
+      return;
     }
-    const prompt = requireText(promptParts, "prompt");
-    const controller = apiController(store, config);
-    const input = [{ role: "user", content: prompt }] as ResponseInputItem[];
-    await render(
-      controller.start(input, {
-        sessionId,
-        ...requestOptionsFromConfig(config),
-      }),
-    );
-    return;
-  }
 
-  if (command === "attach") {
-    const sessionId = requireText(args.slice(0, 1), "session-id");
-    await render(apiController(store, config).attach(sessionId));
-    return;
-  }
+    if (command === "continue") {
+      const [sessionId, ...promptParts] = args;
+      if (sessionId === undefined) {
+        throw new Error("session-id is required");
+      }
+      const prompt = requireText(promptParts, "prompt");
+      await render(await service.continueSession(sessionId, prompt));
+      return;
+    }
 
-  if (command === "cancel") {
-    const sessionId = requireText(args.slice(0, 1), "session-id");
-    renderEvent(
-      await apiController(store, config).cancel(sessionId),
-      consoleWriter,
-    );
-    return;
-  }
+    if (command === "attach") {
+      const sessionId = requireText(args.slice(0, 1), "session-id");
+      await render(await service.attach(sessionId));
+      return;
+    }
 
-  throw new Error(`Unknown command: ${command}\n\n${USAGE}`);
+    if (command === "cancel") {
+      const sessionId = requireText(args.slice(0, 1), "session-id");
+      renderEvent(await service.cancel(sessionId), consoleWriter);
+      return;
+    }
+
+    throw new Error(`Unknown command: ${command}\n\n${USAGE}`);
+  } finally {
+    await releaseLease();
+  }
 }
 
 main(process.argv.slice(2)).catch((error: unknown) => {
   if (error instanceof StreamEndedWithoutTerminalError) {
     process.stderr.write(
-      `\n[stream interrupted at sequence ${error.lastSequenceNumber}; run attach to resume]\n`,
+      `\n[stream ended without a terminal event at sequence ${error.lastSequenceNumber}; run failed]\n`,
     );
   } else {
     const message = error instanceof Error ? error.message : String(error);

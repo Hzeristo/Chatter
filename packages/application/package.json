@@ -1,0 +1,27 @@
+{
+  "name": "@mas-chat/application",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@mas-chat/config": "workspace:*",
+    "@mas-chat/protocol": "workspace:*",
+    "@mas-chat/runtime": "workspace:*",
+    "@mas-chat/storage": "workspace:*",
+    "openai": "^7.20.0",
+    "proper-lockfile": "^4.1.2"
+  },
+  "devDependencies": {
+    "@types/proper-lockfile": "^4.1.4"
+  }
+}

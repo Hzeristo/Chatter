@@ -3,6 +3,7 @@ import { marked } from "marked";
 
 const elements = {
   badge: document.querySelector("#config-badge"),
+  cancelFork: document.querySelector("#cancel-fork"),
   composer: document.querySelector("#composer"),
   empty: document.querySelector("#empty-state"),
   log: document.querySelector("#activity-log"),
@@ -11,6 +12,7 @@ const elements = {
   prompt: document.querySelector("#prompt"),
   promptPreview: document.querySelector("#prompt-preview"),
   send: document.querySelector("#send"),
+  stop: document.querySelector("#stop"),
   sessionSelect: document.querySelector("#session-select"),
   sessionLabel: document.querySelector("#session-label"),
   status: document.querySelector("#status"),
@@ -21,10 +23,14 @@ const state = {
   headTurnId: null,
   running: false,
   canContinue: true,
+  canStop: false,
   assistantNodes: new Map(),
   userMessages: new Map(),
   editingTurnId: null,
+  forkSourceTurnId: null,
   pollTimer: null,
+  streamAbortController: null,
+  stopRequested: false,
 };
 const SESSION_STORAGE_KEY = "mas-chat.session-id";
 
@@ -112,15 +118,20 @@ function renderRichText(element, source) {
 
 function setStatus(status) {
   elements.status.textContent = status;
-  elements.sessionLabel.textContent = state.sessionId
-    ? `session ${state.sessionId.slice(0, 8)}`
-    : "准备会话中";
+  elements.sessionLabel.textContent = state.forkSourceTurnId
+    ? `从 ${state.forkSourceTurnId.slice(0, 8)} 分支`
+    : state.sessionId
+      ? `session ${state.sessionId.slice(0, 8)}`
+      : "准备会话中";
+  elements.cancelFork.hidden = state.forkSourceTurnId === null;
 }
 
 function updateComposerState() {
   const disabled = state.running || !state.canContinue || state.editingTurnId !== null;
   elements.prompt.disabled = disabled;
   elements.send.disabled = disabled;
+  elements.stop.hidden = !state.canStop;
+  elements.stop.disabled = !state.canStop || state.stopRequested;
 }
 
 function formatSessionOption(session) {
@@ -200,6 +211,15 @@ function addMessage(message) {
     retry.textContent = message.turnStatus === "completed" ? "重新生成" : "重试";
     retry.disabled = message.retryable === false;
     actions.append(retry);
+
+    const fork = document.createElement("button");
+    fork.type = "button";
+    fork.className = "message-action";
+    fork.dataset.action = "fork";
+    fork.dataset.turnId = message.turnId;
+    fork.textContent = "分支";
+    fork.disabled = message.forkable !== true;
+    actions.append(fork);
 
     if (Array.isArray(message.versions) && message.versions.length > 1) {
       const index = message.versionIndex ?? 0;
@@ -316,8 +336,10 @@ function prepareForkDisplay(turnId, prompt) {
 }
 
 function renderSession(view) {
+  state.forkSourceTurnId = null;
   state.headTurnId = view.headTurnId;
   state.canContinue = view.canContinue;
+  state.canStop = view.recovery === "attachable" || view.recovery === "running";
   if (state.sessionId && state.headTurnId) {
     localStorage.setItem(headStorageKey(state.sessionId), state.headTurnId);
   }
@@ -439,23 +461,36 @@ async function attachIfNeeded(view) {
   }
   if (view.recovery !== "attachable") return;
   state.running = true;
+  const abortController = new AbortController();
+  state.streamAbortController = abortController;
   updateComposerState();
   try {
     addActivity("连接", "尝试恢复运行中的响应");
-    const result = await consumeSse(await fetch(`/api/sessions/${state.sessionId}/attach`));
+    const result = await consumeSse(await fetch(
+      `/api/sessions/${state.sessionId}/attach`,
+      { signal: abortController.signal },
+    ));
     if (result.terminal) {
       state.headTurnId = null;
       await loadSession(null);
     }
   } catch (error) {
     addActivity("连接", error.message);
+    try {
+      await loadSession(null, { recover: false });
+    } catch (reloadError) {
+      addActivity("恢复", reloadError.message);
+    }
   } finally {
+    if (state.streamAbortController === abortController) {
+      state.streamAbortController = null;
+    }
     state.running = false;
     updateComposerState();
   }
 }
 
-async function loadSession(headTurnId = state.headTurnId) {
+async function loadSession(headTurnId = state.headTurnId, options = {}) {
   if (state.pollTimer !== null) {
     clearTimeout(state.pollTimer);
     state.pollTimer = null;
@@ -463,7 +498,9 @@ async function loadSession(headTurnId = state.headTurnId) {
   const query = headTurnId ? `?head=${encodeURIComponent(headTurnId)}` : "";
   const view = await requestJson(`/api/sessions/${state.sessionId}${query}`);
   renderSession(view);
-  await attachIfNeeded(view);
+  if (options.recover !== false) {
+    await attachIfNeeded(view);
+  }
   await refreshSessionList();
 }
 
@@ -481,30 +518,45 @@ async function sendPrompt(event) {
   const prompt = elements.prompt.value.trim();
   if (!prompt) return;
   state.running = true;
+  state.canStop = true;
   updateComposerState();
   addMessage({ id: `local-user-${Date.now()}`, role: "user", text: prompt });
   elements.prompt.value = "";
   updatePromptPreview();
   elements.log.replaceChildren();
   setStatus("in_progress");
+  const abortController = new AbortController();
+  state.streamAbortController = abortController;
   try {
-    await consumeSse(await fetch(`/api/sessions/${state.sessionId}/turn`, {
+    const endpoint = state.forkSourceTurnId
+      ? `/api/sessions/${state.sessionId}/turns/${encodeURIComponent(state.forkSourceTurnId)}/fork`
+      : `/api/sessions/${state.sessionId}/turn`;
+    await consumeSse(await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, parentTurnId: state.headTurnId }),
+      signal: abortController.signal,
+      body: JSON.stringify(
+        state.forkSourceTurnId
+          ? { prompt }
+          : { prompt, parentTurnId: state.headTurnId },
+      ),
     }));
+    state.forkSourceTurnId = null;
     state.headTurnId = null;
-    await loadSession(null);
+    await loadSession(null, { recover: false });
   } catch (error) {
     addActivity("错误", error.message);
     state.headTurnId = null;
     try {
-      await loadSession(null);
+      await loadSession(null, { recover: false });
     } catch (reloadError) {
       setStatus("failed");
       addActivity("恢复", reloadError.message);
     }
   } finally {
+    if (state.streamAbortController === abortController) {
+      state.streamAbortController = null;
+    }
     state.running = false;
     updateComposerState();
     elements.prompt.focus();
@@ -514,27 +566,33 @@ async function sendPrompt(event) {
 async function retryTurn(turnId) {
   if (state.running) return;
   state.running = true;
+  state.canStop = true;
   updateComposerState();
   elements.log.replaceChildren();
   addActivity("重试", "从该用户消息重新生成");
   const prompt = state.userMessages.get(turnId)?.text;
   if (prompt) prepareForkDisplay(turnId, prompt);
+  const abortController = new AbortController();
+  state.streamAbortController = abortController;
   try {
     await consumeSse(await fetch(
       `/api/sessions/${state.sessionId}/turns/${encodeURIComponent(turnId)}/retry`,
-      { method: "POST" },
+      { method: "POST", signal: abortController.signal },
     ));
     state.headTurnId = null;
-    await loadSession(null);
+    await loadSession(null, { recover: false });
   } catch (error) {
     addActivity("错误", error.message);
     state.headTurnId = null;
     try {
-      await loadSession(null);
+      await loadSession(null, { recover: false });
     } catch (reloadError) {
       addActivity("恢复", reloadError.message);
     }
   } finally {
+    if (state.streamAbortController === abortController) {
+      state.streamAbortController = null;
+    }
     state.running = false;
     updateComposerState();
     elements.prompt.focus();
@@ -544,37 +602,77 @@ async function retryTurn(turnId) {
 async function editTurn(turnId, prompt) {
   if (state.running) return;
   state.running = true;
+  state.canStop = true;
   prepareForkDisplay(turnId, prompt);
   updateComposerState();
   elements.log.replaceChildren();
   addActivity("编辑", "从修改后的用户消息重新生成");
+  const abortController = new AbortController();
+  state.streamAbortController = abortController;
   try {
     await consumeSse(await fetch(
       `/api/sessions/${state.sessionId}/turns/${encodeURIComponent(turnId)}/edit`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: abortController.signal,
         body: JSON.stringify({ prompt }),
       },
     ));
     state.headTurnId = null;
-    await loadSession(null);
+    await loadSession(null, { recover: false });
   } catch (error) {
     addActivity("错误", error.message);
     state.headTurnId = null;
     try {
-      await loadSession(null);
+      await loadSession(null, { recover: false });
     } catch (reloadError) {
       addActivity("恢复", reloadError.message);
     }
   } finally {
+    if (state.streamAbortController === abortController) {
+      state.streamAbortController = null;
+    }
     state.running = false;
     updateComposerState();
     elements.prompt.focus();
   }
 }
 
+async function stopGeneration() {
+  if (!state.sessionId || (!state.running && !state.canStop)) return;
+  state.stopRequested = true;
+  updateComposerState();
+  addActivity("停止", "正在停止生成");
+  let remoteStopped = false;
+  try {
+    const result = await requestJson(`/api/sessions/${state.sessionId}/cancel`, {
+      method: "POST",
+    });
+    remoteStopped = result.kind === "terminal" || result.status === "cancelled";
+    addActivity("停止", "生成已停止");
+  } catch (error) {
+    addActivity("停止", error.message);
+  } finally {
+    state.streamAbortController?.abort();
+    state.streamAbortController = null;
+    state.running = false;
+    state.canStop = false;
+    state.stopRequested = false;
+    try {
+      await loadSession(null, { recover: false });
+    } catch (reloadError) {
+      addActivity("恢复", reloadError.message);
+    }
+    if (!remoteStopped) {
+      addActivity("停止", "已断开当前生成连接");
+    }
+    updateComposerState();
+  }
+}
+
 elements.composer.addEventListener("submit", sendPrompt);
+elements.stop.addEventListener("click", stopGeneration);
 elements.newSession.addEventListener("click", async () => {
   if (state.running) return;
   try {
@@ -584,6 +682,11 @@ elements.newSession.addEventListener("click", async () => {
   } catch (error) {
     addActivity("错误", error.message);
   }
+});
+elements.cancelFork.addEventListener("click", async () => {
+  state.forkSourceTurnId = null;
+  await loadSession(null);
+  elements.prompt.focus();
 });
 elements.sessionSelect.addEventListener("change", async () => {
   const sessionId = elements.sessionSelect.value;
@@ -609,6 +712,11 @@ elements.messages.addEventListener("click", async (event) => {
     elements.prompt.focus();
   } else if (button.dataset.action === "retry" && button.dataset.turnId) {
     await retryTurn(button.dataset.turnId);
+  } else if (button.dataset.action === "fork" && button.dataset.turnId) {
+    await loadSession(button.dataset.turnId);
+    state.forkSourceTurnId = button.dataset.turnId;
+    setStatus(elements.status.textContent);
+    elements.prompt.focus();
   } else if (button.dataset.action === "switch-version" && button.dataset.headTurnId) {
     state.headTurnId = button.dataset.headTurnId;
     await loadSession(state.headTurnId);

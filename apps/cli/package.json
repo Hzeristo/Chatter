@@ -18,6 +18,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@mas-chat/application": "workspace:*",
+    "@mas-chat/config": "workspace:*",
     "@mas-chat/protocol": "workspace:*",
     "@mas-chat/runtime": "workspace:*",
     "@mas-chat/storage": "workspace:*",

@@ -5,6 +5,7 @@
 第一版前端是一个本地 Web 壳，不是新的 agent framework：
 
 - `apps/web` 使用 Node 内置 `http` 服务，不增加 React、UI kit、状态库或 Markdown 依赖；
+- HTTP server 只负责请求解析、状态码/SSE 和静态资源；session 用例统一进入 `@mas-chat/application`；
 - 服务端持有 OpenAI client、配置和 `SessionStore`，浏览器永远不接触 API key；
 - `/api/sessions/:id/turn` 和 `/attach` 以 SSE 转发 runtime 的 `NormalizedEvent`；
 - `/api/sessions/:id` 只返回由本地 journal 投影出的 user/assistant 文本和状态，不把 encrypted reasoning 或原始事件发送到浏览器；
@@ -13,7 +14,10 @@
 - 消息气泡使用本地 bundle 的 Markdown + inline LaTeX 渲染；输入框保留原生 textarea，并在下方显示同样的实时预览；原始 HTML 会被转义，危险 URL/事件属性会被移除；
 - 已支持从本地 session 列表选择并接续既有会话；列表只返回状态、时间、首条用户消息摘要和消息数量，不返回原始 journal。
 - user message 下提供重试/重新生成和原位编辑后重试；新结果作为同一 session 中的 sibling turn 保存，版本按钮切换整条 branch path；
+- 完成的历史 turn 提供显式分支入口，下一条消息以该 turn 为 parent，并记录 explicit fork lineage；
 - 未终结 turn 会从已落盘 response events 重建 partial 文本。仍在本进程运行时前端轮询，持久化了 response ID 的 background 可 attach；失去进程所有者的 foreground 或没有 response ID 的 background 自动记为失败。attach 断开后允许直接输入，发送时先 supersede 旧 response，再保留其 user input 接续新 turn；
+- 远端 API 4xx/5xx、streaming error、上游 `type: "error"` 事件以及没有 terminal event 就结束的流都会显示为错误并结束当前 turn，重新打开 session 不会再次 attach。composer 在运行中显示“停止生成”，优先调用 cancel，foreground 或 cancel 失败时将本地 turn 收敛为 failed；
+- session GET/list 是纯 projection，不执行恢复或写盘。Web 取得 data-directory 单写者租约后，在监听端口前统一处理上一实例遗留的不可恢复 turn；
 - 当前不实现设置编辑、主题系统、鉴权、多用户或跨机器部署。
 
 启动：

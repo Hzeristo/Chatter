@@ -1,21 +1,24 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import OpenAI from "openai";
-import type { ResponseInputItem } from "openai/resources/responses/responses";
 
+import {
+  acquireDataDirectoryLease,
+  SessionService,
+} from "@mas-chat/application";
 import type {
   JsonObject,
   JsonValue,
   OpenAINativeItem,
 } from "@mas-chat/protocol";
-import { OpenAIResponsesTransport, RunController } from "@mas-chat/runtime";
-import { SessionStore } from "@mas-chat/storage";
-
 import {
   loadConfig,
   requireApiKey,
-  requestOptionsFromConfig,
-} from "./config.js";
+  runPolicyFromConfig,
+} from "@mas-chat/config";
+import { OpenAIResponsesTransport, RunController } from "@mas-chat/runtime";
+import { SessionStore } from "@mas-chat/storage";
+
 import {
   GENERAL_ASSISTANT_V1,
   WEB_RELAXED_V3,
@@ -104,10 +107,7 @@ async function main(): Promise<void> {
   const {
     developerPrompt: _configuredPrompt,
     ...sharedOptions
-  } = requestOptionsFromConfig(config);
-  const input = [
-    { role: "user", content: WA2_PROMPT },
-  ] as ResponseInputItem[];
+  } = runPolicyFromConfig(config);
   let failed = false;
 
   process.stdout.write(
@@ -123,73 +123,80 @@ async function main(): Promise<void> {
     })}\n`,
   );
 
-  for (const variant of selectedVariants()) {
-    const sessionId = randomUUID();
-    await store.createSession(sessionId);
-    process.stdout.write(
-      `${JSON.stringify({
-        stage: "variant.start",
-        variant: variant.id,
-        sessionId,
-        instructionsOmitted: variant.instructions === null,
-        promptHash: promptHash(variant.instructions),
-      })}\n`,
-    );
-
-    try {
-      for await (const _event of controller.start(input, {
-        sessionId,
+  const releaseLease = await acquireDataDirectoryLease(config.dataDirectory);
+  try {
+    for (const variant of selectedVariants()) {
+      const service = new SessionService(store, () => controller, {
         ...sharedOptions,
         developerPrompt: variant.instructions,
-      })) {
-        // Drain the complete stream; the journal remains the source of truth.
-      }
-
-      const records = await store.readJournal(sessionId);
-      const output = records.findLast(
-        (record) => record.kind === "turn.output",
+      });
+      const sessionId = await service.createSession();
+      process.stdout.write(
+        `${JSON.stringify({
+          stage: "variant.start",
+          variant: variant.id,
+          sessionId,
+          instructionsOmitted: variant.instructions === null,
+          promptHash: promptHash(variant.instructions),
+        })}\n`,
       );
-      const items = output?.kind === "turn.output" ? output.items : [];
-      const response =
-        output?.kind === "turn.output" ? output.response : undefined;
-      const usage = objectValue(response?.usage);
-      const outputTokenDetails = objectValue(usage?.output_tokens_details);
-      const executionModes = records
-        .filter((record) => record.kind === "turn.input")
-        .map((record) =>
-          record.kind === "turn.input" && record.configuration.background
-            ? "background"
-            : "foreground",
+
+      try {
+        for await (const _event of await service.continueSession(
+          sessionId,
+          WA2_PROMPT,
+        )) {
+          // Drain the complete stream; the journal remains the source of truth.
+        }
+
+        const records = await store.readJournal(sessionId);
+        const output = records.findLast(
+          (record) => record.kind === "turn.output",
         );
-      const text = assistantText(items);
+        const items = output?.kind === "turn.output" ? output.items : [];
+        const response =
+          output?.kind === "turn.output" ? output.response : undefined;
+        const usage = objectValue(response?.usage);
+        const outputTokenDetails = objectValue(usage?.output_tokens_details);
+        const executionModes = records
+          .filter((record) => record.kind === "turn.input")
+          .map((record) =>
+            record.kind === "turn.input" && record.configuration.background
+              ? "background"
+              : "foreground",
+          );
+        const text = assistantText(items);
 
-      process.stdout.write(
-        `${JSON.stringify({
-          stage: "variant.result",
-          variant: variant.id,
-          sessionId,
-          status: output?.kind === "turn.output" ? output.status : "missing",
-          executionModes,
-          outputItemTypes: items.map((item) => item.type ?? "unknown"),
-          reasoningTokens:
-            typeof outputTokenDetails?.reasoning_tokens === "number"
-              ? outputTokenDetails.reasoning_tokens
-              : null,
-          outputCharacters: text.length,
-        })}\n`,
-      );
-      process.stdout.write(`\n===== ${variant.id} =====\n${text}\n\n`);
-    } catch (error) {
-      failed = true;
-      process.stdout.write(
-        `${JSON.stringify({
-          stage: "variant.failure",
-          variant: variant.id,
-          sessionId,
-          error: safeError(error),
-        })}\n`,
-      );
+        process.stdout.write(
+          `${JSON.stringify({
+            stage: "variant.result",
+            variant: variant.id,
+            sessionId,
+            status: output?.kind === "turn.output" ? output.status : "missing",
+            executionModes,
+            outputItemTypes: items.map((item) => item.type ?? "unknown"),
+            reasoningTokens:
+              typeof outputTokenDetails?.reasoning_tokens === "number"
+                ? outputTokenDetails.reasoning_tokens
+                : null,
+            outputCharacters: text.length,
+          })}\n`,
+        );
+        process.stdout.write(`\n===== ${variant.id} =====\n${text}\n\n`);
+      } catch (error) {
+        failed = true;
+        process.stdout.write(
+          `${JSON.stringify({
+            stage: "variant.failure",
+            variant: variant.id,
+            sessionId,
+            error: safeError(error),
+          })}\n`,
+        );
+      }
     }
+  } finally {
+    await releaseLease();
   }
 
   if (failed) {

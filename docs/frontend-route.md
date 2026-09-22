@@ -12,6 +12,8 @@
 - `reasoning` 和 hosted tool 只作为运行状态显示，不声称展示原始 chain-of-thought；
 - 消息气泡使用本地 bundle 的 Markdown + inline LaTeX 渲染；输入框保留原生 textarea，并在下方显示同样的实时预览；原始 HTML 会被转义，危险 URL/事件属性会被移除；
 - 已支持从本地 session 列表选择并接续既有会话；列表只返回状态、时间、首条用户消息摘要和消息数量，不返回原始 journal。
+- user message 下提供重试/重新生成和原位编辑后重试；新结果作为同一 session 中的 sibling turn 保存，版本按钮切换整条 branch path；
+- 未终结 turn 会从已落盘 response events 重建 partial 文本。仍在本进程运行时前端轮询，持久化了 response ID 的 background 可 attach；失去进程所有者的 foreground 或没有 response ID 的 background 自动记为失败。attach 断开后允许直接输入，发送时先 supersede 旧 response，再保留其 user input 接续新 turn；
 - 当前不实现设置编辑、主题系统、鉴权、多用户或跨机器部署。
 
 启动：

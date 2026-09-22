@@ -3,7 +3,7 @@
 状态：Accepted
 
 日期：2026-09-20
-最近更新：2026-09-21（强制 `store: false`；增加全局 foreground fallback；锁定网页端式回答目标；增加 session following instruction）
+最近更新：2026-09-21（强制 `store: false`；增加全局 foreground fallback；锁定网页端式回答目标；增加 session following instruction；增加 session 内 turn 分支与重试）
 
 ## 1. 产品目标
 
@@ -113,6 +113,8 @@ Event reducer ───────► normalized UI events
 
 JSONL 是 append-only write-ahead journal，保留四类记录：新 turn 的原生 input items、Responses 原始流事件、terminal Response 的完整 output items，以及在创建远端 Response 前失败的本地 abort。它既支持协议升级、故障复现和 UI 重新投影，也能重建下一轮 API 输入。元数据使用临时文件加原子 rename 写入；journal 比 metadata 更新而 metadata 尚未更新时，以 journal 重建游标。需要全文搜索或大量会话后，再以 SQLite 建立可重建索引；SQLite 不成为初始正确性的依赖。
 
+每个新 `turn.input` 记录显式 lineage：`parentTurnId` 指向所选对话路径的上一轮，retry/edit 以 fork metadata 指向来源 turn。旧 journal 不重写；缺少 lineage 的旧 turn 按 journal 顺序连接到当时最近成功完成的 turn。一个 session 因此可以形成 turn tree，但下一轮请求只重放从根到所选父节点的单一路径。失败、截断、incomplete 和 cancelled turn 可保留并展示；继续输入时保留这些 turn 的 user input，但其 partial/terminal assistant output 绝不进入新请求的 replay history。
+
 日志不追求人类可读 transcript。跨轮“完整”的标准是：按原顺序保留用户 input 与每个 `response.output` item，包括 encrypted reasoning、assistant `phase`、hosted-tool call、来源和 annotations，能够无损构造下一轮 Responses `input`。API key、Authorization header 和 SDK 请求头不得进入 journal。
 
 ## 6. 初始请求策略
@@ -178,6 +180,8 @@ UI 可以改变外观，但不得丢弃这些语义边界。
 
 Foreground fallback 仍按相同顺序落盘 SSE 和 terminal output，但连接中断即将 turn 标记为本地失败，不允许 attach；同步 Response 的取消语义是终止当前连接，因此另一个 CLI 进程不得调用 background cancel endpoint 并伪装成功。
 
+Web 服务维护进程内 active-run registry，用来区分“页面连接已断但服务仍在消费”与真正失去执行所有者的 turn。服务重启后仍显示 `queued/in_progress` 的 foreground turn 会被 journal 为 orphan failure；background turn 仍优先 attach，但尚未持久化 response ID 的 background turn 同样不可恢复并会明确失败。用户重试会在同一 session 中创建 sibling turn，复用原 user input 和原 turn 的父节点；若来源 background response 仍可恢复，则先尝试服务端 cancel 并持久化其真实 terminal 状态。兼容端点不支持或未能完成 cancel 时，journal 会明确记录本地 supersede 及 cancel error，再允许 sibling retry；此时旧远端 response 可能继续运行。已落盘的 partial assistant output 只用于展示。
+
 当前锁定的官方 `openai` JavaScript SDK 已直接暴露 streaming retrieve 与 `starting_after`。runtime 仍保留独立 SSE parser，用于协议测试和 SDK/REST 能力发生短期错位时的薄 fallback，不建立第二套 provider abstraction。
 
 ## 9. 开发阶段
@@ -216,6 +220,7 @@ Foreground fallback 仍按相同顺序落盘 SSE 和 terminal output，但连接
 
 - 已增加一个只绑定本地地址的原生 Web 壳，作为 protocol consumer；
 - UI 只能消费 protocol，不得重新实现 Responses 状态机；
+- 已支持在 user message 下重试/重新生成或原位编辑后重试，并在同一 session 内切换 sibling turn 版本；
 - 视觉、Markdown、会话列表、设置编辑和多用户部署暂不预设，避免在真实交互反馈前过度设计。
 
 ## 10. 验收标准

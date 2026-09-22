@@ -14,6 +14,8 @@ import type {
   RunConfigurationSnapshot,
   SessionMetadata,
   TerminalStatus,
+  TurnForkMetadata,
+  TurnLineage,
 } from "@mas-chat/protocol";
 
 import {
@@ -21,7 +23,7 @@ import {
   ForegroundResponseNotResumableError,
   StreamEndedWithoutTerminalError,
 } from "./errors.js";
-import { buildReplayHistory } from "./history.js";
+import { buildReplayHistory, latestCompletedTurnId } from "./history.js";
 import {
   createResponseProjection,
   reduceResponseEvent,
@@ -44,6 +46,7 @@ export interface RunStore {
     turnId: string,
     items: OpenAINativeItem[],
     configuration: RunConfigurationSnapshot,
+    lineage?: TurnLineage,
   ): Promise<SessionMetadata>;
   failTurn(
     sessionId: string,
@@ -70,6 +73,9 @@ export interface RunStore {
 
 export interface StartRunOptions extends StatelessRequestOptions {
   backgroundFallback?: BackgroundFallbackPolicy;
+  fork?: TurnForkMetadata;
+  /** `null` starts a new root branch; omitted continues the latest completed turn. */
+  parentTurnId?: string | null;
   sessionId: string;
 }
 
@@ -179,7 +185,16 @@ export class RunController {
     options: StartRunOptions,
   ): AsyncGenerator<NormalizedEvent> {
     const records = await this.#store.readJournal(options.sessionId);
-    const history = buildReplayHistory(records);
+    const parentTurnId =
+      options.parentTurnId === undefined
+        ? latestCompletedTurnId(records)
+        : options.parentTurnId;
+    const history = buildReplayHistory(records, parentTurnId);
+    const lineage: TurnLineage = {
+      parentTurnId,
+      ...(options.fork === undefined ? {} : { fork: options.fork }),
+    };
+    const backgroundTurnId = this.#turnId();
     let prepared: PreparedTurn;
     try {
       prepared = await this.prepareTurn(
@@ -188,6 +203,8 @@ export class RunController {
         newItems,
         options,
         true,
+        lineage,
+        backgroundTurnId,
       );
     } catch (error) {
       if (
@@ -202,6 +219,14 @@ export class RunController {
         newItems,
         options,
         false,
+        {
+          parentTurnId,
+          fork: {
+            kind: "transport_fallback",
+            sourceTurnId: backgroundTurnId,
+          },
+        },
+        this.#turnId(),
       );
     }
 
@@ -379,6 +404,8 @@ export class RunController {
     newItems: ResponseInputItem[],
     options: StatelessRequestOptions,
     background: boolean,
+    lineage: TurnLineage,
+    turnId: string,
   ): Promise<PreparedTurn> {
     const request = buildStatelessResponseRequest(
       history,
@@ -386,12 +413,12 @@ export class RunController {
       options,
       background,
     );
-    const turnId = this.#turnId();
     await this.#store.beginTurn(
       sessionId,
       turnId,
       nativeItems(newItems),
       snapshotRunConfiguration(request),
+      lineage,
     );
 
     try {

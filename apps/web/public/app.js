@@ -18,10 +18,19 @@ const elements = {
 
 const state = {
   sessionId: null,
+  headTurnId: null,
   running: false,
+  canContinue: true,
   assistantNodes: new Map(),
+  userMessages: new Map(),
+  editingTurnId: null,
+  pollTimer: null,
 };
 const SESSION_STORAGE_KEY = "mas-chat.session-id";
+
+function headStorageKey(sessionId) {
+  return `mas-chat.session-head.${sessionId}`;
+}
 
 function escapedMarkdownSource(source) {
   // Raw HTML is not part of the chat rendering contract. Escaping `<` keeps
@@ -108,6 +117,12 @@ function setStatus(status) {
     : "准备会话中";
 }
 
+function updateComposerState() {
+  const disabled = state.running || !state.canContinue || state.editingTurnId !== null;
+  elements.prompt.disabled = disabled;
+  elements.send.disabled = disabled;
+}
+
 function formatSessionOption(session) {
   const preview = session.preview || "空会话";
   const date = new Date(session.updatedAt);
@@ -146,6 +161,8 @@ function clearConversation() {
   elements.messages.replaceChildren();
   elements.empty = null;
   state.assistantNodes.clear();
+  state.userMessages.clear();
+  state.editingTurnId = null;
 }
 
 function addMessage(message) {
@@ -157,12 +174,153 @@ function addMessage(message) {
   const node = { wrapper, bubble, raw: message.text };
   renderRichText(bubble, node.raw);
   wrapper.append(bubble);
+  if (message.role === "user" && message.turnId) {
+    state.userMessages.set(message.turnId, {
+      bubble,
+      text: message.text,
+      wrapper,
+    });
+    const actions = document.createElement("div");
+    actions.className = "message-actions";
+
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "message-action";
+    edit.dataset.action = "edit";
+    edit.dataset.turnId = message.turnId;
+    edit.textContent = "编辑";
+    edit.disabled = message.retryable === false;
+    actions.append(edit);
+
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "message-action";
+    retry.dataset.action = "retry";
+    retry.dataset.turnId = message.turnId;
+    retry.textContent = message.turnStatus === "completed" ? "重新生成" : "重试";
+    retry.disabled = message.retryable === false;
+    actions.append(retry);
+
+    if (Array.isArray(message.versions) && message.versions.length > 1) {
+      const index = message.versionIndex ?? 0;
+      const previous = document.createElement("button");
+      previous.type = "button";
+      previous.className = "message-action icon-action";
+      previous.dataset.action = "switch-version";
+      previous.dataset.headTurnId = message.versions[Math.max(0, index - 1)].headTurnId;
+      previous.textContent = "‹";
+      previous.title = "上一个版本";
+      previous.disabled = index <= 0;
+
+      const counter = document.createElement("span");
+      counter.className = "version-counter";
+      counter.textContent = `${index + 1} / ${message.versions.length}`;
+
+      const next = document.createElement("button");
+      next.type = "button";
+      next.className = "message-action icon-action";
+      next.dataset.action = "switch-version";
+      next.dataset.headTurnId = message.versions[Math.min(message.versions.length - 1, index + 1)].headTurnId;
+      next.textContent = "›";
+      next.title = "下一个版本";
+      next.disabled = index >= message.versions.length - 1;
+      actions.append(previous, counter, next);
+    }
+
+    if (message.turnStatus && message.turnStatus !== "completed") {
+      const status = document.createElement("span");
+      status.className = "turn-status";
+      status.textContent = message.turnStatus;
+      actions.append(status);
+    }
+    wrapper.append(actions);
+  }
+  if (message.partial) {
+    wrapper.classList.add("partial");
+  }
   elements.messages.append(wrapper);
   elements.messages.scrollTop = elements.messages.scrollHeight;
   return node;
 }
 
+function resizeEditInput(input) {
+  input.style.height = "auto";
+  input.style.height = `${Math.min(Math.max(input.scrollHeight, 96), 420)}px`;
+}
+
+function closeEditTurn() {
+  if (state.editingTurnId === null) return;
+  const message = state.userMessages.get(state.editingTurnId);
+  if (message) {
+    message.wrapper.querySelector(".message-edit-form")?.remove();
+    message.bubble.hidden = false;
+    const actions = message.wrapper.querySelector(".message-actions");
+    if (actions) actions.hidden = false;
+  }
+  state.editingTurnId = null;
+  updateComposerState();
+}
+
+function beginEditTurn(turnId) {
+  if (state.running) return;
+  closeEditTurn();
+  const message = state.userMessages.get(turnId);
+  if (!message) return;
+
+  const form = document.createElement("form");
+  form.className = "message-edit-form";
+  form.dataset.turnId = turnId;
+  const input = document.createElement("textarea");
+  input.className = "message-edit-input";
+  input.value = message.text;
+  input.setAttribute("aria-label", "编辑消息");
+
+  const footer = document.createElement("div");
+  footer.className = "message-edit-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "button secondary compact";
+  cancel.dataset.action = "cancel-edit";
+  cancel.textContent = "取消";
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.className = "button primary compact";
+  submit.textContent = "发送";
+  footer.append(cancel, submit);
+  form.append(input, footer);
+
+  message.bubble.hidden = true;
+  const actions = message.wrapper.querySelector(".message-actions");
+  if (actions) actions.hidden = true;
+  message.wrapper.prepend(form);
+  state.editingTurnId = turnId;
+  updateComposerState();
+  resizeEditInput(input);
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function prepareForkDisplay(turnId, prompt) {
+  const message = state.userMessages.get(turnId);
+  if (!message) return;
+  closeEditTurn();
+  message.text = prompt;
+  renderRichText(message.bubble, prompt);
+  let sibling = message.wrapper.nextElementSibling;
+  while (sibling) {
+    const next = sibling.nextElementSibling;
+    sibling.remove();
+    sibling = next;
+  }
+  state.assistantNodes.clear();
+}
+
 function renderSession(view) {
+  state.headTurnId = view.headTurnId;
+  state.canContinue = view.canContinue;
+  if (state.sessionId && state.headTurnId) {
+    localStorage.setItem(headStorageKey(state.sessionId), state.headTurnId);
+  }
   clearConversation();
   if (view.messages.length === 0) {
     const empty = document.createElement("section");
@@ -173,6 +331,7 @@ function renderSession(view) {
     view.messages.forEach(addMessage);
   }
   setStatus(view.status);
+  updateComposerState();
 }
 
 function updateAssistant(event) {
@@ -236,12 +395,18 @@ async function requestJson(url, options) {
 }
 
 async function consumeSse(response) {
-  if (!response.ok || !response.body) {
-    throw new Error(`Stream failed: HTTP ${response.status}`);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error?.message || `Stream failed: HTTP ${response.status}`);
+  }
+  if (!response.body) {
+    throw new Error("Stream failed: response has no body");
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let terminal = false;
+  let streamError = null;
   while (true) {
     const { value, done } = await reader.read();
     buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
@@ -250,24 +415,53 @@ async function consumeSse(response) {
     for (const frame of frames) {
       const data = frame.split("\n").find((line) => line.startsWith("data: "));
       if (!data) continue;
-      handleEvent(JSON.parse(data.slice(6)));
+      const event = JSON.parse(data.slice(6));
+      handleEvent(event);
+      terminal ||= event.kind === "terminal";
+      if (event.kind === "error") {
+        streamError = event.error?.message || "stream error";
+      }
     }
     if (done) break;
   }
+  if (streamError !== null) {
+    throw new Error(streamError);
+  }
+  return { terminal };
 }
 
 async function attachIfNeeded(view) {
-  if (view.status !== "queued" && view.status !== "in_progress") return;
+  if (view.recovery === "running") {
+    state.pollTimer = setTimeout(() => {
+      if (!state.running) loadSession(state.headTurnId).catch((error) => addActivity("错误", error.message));
+    }, 1500);
+    return;
+  }
+  if (view.recovery !== "attachable") return;
+  state.running = true;
+  updateComposerState();
   try {
     addActivity("连接", "尝试恢复运行中的响应");
-    await consumeSse(await fetch(`/api/sessions/${state.sessionId}/attach`));
+    const result = await consumeSse(await fetch(`/api/sessions/${state.sessionId}/attach`));
+    if (result.terminal) {
+      state.headTurnId = null;
+      await loadSession(null);
+    }
   } catch (error) {
     addActivity("连接", error.message);
+  } finally {
+    state.running = false;
+    updateComposerState();
   }
 }
 
-async function loadSession() {
-  const view = await requestJson(`/api/sessions/${state.sessionId}`);
+async function loadSession(headTurnId = state.headTurnId) {
+  if (state.pollTimer !== null) {
+    clearTimeout(state.pollTimer);
+    state.pollTimer = null;
+  }
+  const query = headTurnId ? `?head=${encodeURIComponent(headTurnId)}` : "";
+  const view = await requestJson(`/api/sessions/${state.sessionId}${query}`);
   renderSession(view);
   await attachIfNeeded(view);
   await refreshSessionList();
@@ -276,6 +470,7 @@ async function loadSession() {
 async function createSession() {
   const result = await requestJson("/api/sessions", { method: "POST" });
   state.sessionId = result.sessionId;
+  state.headTurnId = null;
   localStorage.setItem(SESSION_STORAGE_KEY, state.sessionId);
   await loadSession();
 }
@@ -286,8 +481,7 @@ async function sendPrompt(event) {
   const prompt = elements.prompt.value.trim();
   if (!prompt) return;
   state.running = true;
-  elements.send.disabled = true;
-  elements.prompt.disabled = true;
+  updateComposerState();
   addMessage({ id: `local-user-${Date.now()}`, role: "user", text: prompt });
   elements.prompt.value = "";
   updatePromptPreview();
@@ -297,16 +491,85 @@ async function sendPrompt(event) {
     await consumeSse(await fetch(`/api/sessions/${state.sessionId}/turn`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, parentTurnId: state.headTurnId }),
     }));
-    await loadSession();
+    state.headTurnId = null;
+    await loadSession(null);
   } catch (error) {
     addActivity("错误", error.message);
-    setStatus("failed");
+    state.headTurnId = null;
+    try {
+      await loadSession(null);
+    } catch (reloadError) {
+      setStatus("failed");
+      addActivity("恢复", reloadError.message);
+    }
   } finally {
     state.running = false;
-    elements.send.disabled = false;
-    elements.prompt.disabled = false;
+    updateComposerState();
+    elements.prompt.focus();
+  }
+}
+
+async function retryTurn(turnId) {
+  if (state.running) return;
+  state.running = true;
+  updateComposerState();
+  elements.log.replaceChildren();
+  addActivity("重试", "从该用户消息重新生成");
+  const prompt = state.userMessages.get(turnId)?.text;
+  if (prompt) prepareForkDisplay(turnId, prompt);
+  try {
+    await consumeSse(await fetch(
+      `/api/sessions/${state.sessionId}/turns/${encodeURIComponent(turnId)}/retry`,
+      { method: "POST" },
+    ));
+    state.headTurnId = null;
+    await loadSession(null);
+  } catch (error) {
+    addActivity("错误", error.message);
+    state.headTurnId = null;
+    try {
+      await loadSession(null);
+    } catch (reloadError) {
+      addActivity("恢复", reloadError.message);
+    }
+  } finally {
+    state.running = false;
+    updateComposerState();
+    elements.prompt.focus();
+  }
+}
+
+async function editTurn(turnId, prompt) {
+  if (state.running) return;
+  state.running = true;
+  prepareForkDisplay(turnId, prompt);
+  updateComposerState();
+  elements.log.replaceChildren();
+  addActivity("编辑", "从修改后的用户消息重新生成");
+  try {
+    await consumeSse(await fetch(
+      `/api/sessions/${state.sessionId}/turns/${encodeURIComponent(turnId)}/edit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      },
+    ));
+    state.headTurnId = null;
+    await loadSession(null);
+  } catch (error) {
+    addActivity("错误", error.message);
+    state.headTurnId = null;
+    try {
+      await loadSession(null);
+    } catch (reloadError) {
+      addActivity("恢复", reloadError.message);
+    }
+  } finally {
+    state.running = false;
+    updateComposerState();
     elements.prompt.focus();
   }
 }
@@ -326,6 +589,7 @@ elements.sessionSelect.addEventListener("change", async () => {
   const sessionId = elements.sessionSelect.value;
   if (!sessionId || state.running) return;
   state.sessionId = sessionId;
+  state.headTurnId = localStorage.getItem(headStorageKey(sessionId));
   localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
   elements.log.replaceChildren();
   try {
@@ -333,6 +597,46 @@ elements.sessionSelect.addEventListener("change", async () => {
     elements.prompt.focus();
   } catch (error) {
     addActivity("错误", error.message);
+  }
+});
+elements.messages.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button || state.running) return;
+  if (button.dataset.action === "edit" && button.dataset.turnId) {
+    beginEditTurn(button.dataset.turnId);
+  } else if (button.dataset.action === "cancel-edit") {
+    closeEditTurn();
+    elements.prompt.focus();
+  } else if (button.dataset.action === "retry" && button.dataset.turnId) {
+    await retryTurn(button.dataset.turnId);
+  } else if (button.dataset.action === "switch-version" && button.dataset.headTurnId) {
+    state.headTurnId = button.dataset.headTurnId;
+    await loadSession(state.headTurnId);
+  }
+});
+elements.messages.addEventListener("submit", async (event) => {
+  const form = event.target.closest("form.message-edit-form");
+  if (!form || state.running) return;
+  event.preventDefault();
+  const input = form.querySelector(".message-edit-input");
+  const prompt = input?.value.trim();
+  if (!prompt || !form.dataset.turnId) return;
+  await editTurn(form.dataset.turnId, prompt);
+});
+elements.messages.addEventListener("input", (event) => {
+  if (event.target.matches(".message-edit-input")) {
+    resizeEditInput(event.target);
+  }
+});
+elements.messages.addEventListener("keydown", (event) => {
+  if (!event.target.matches(".message-edit-input")) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeEditTurn();
+    elements.prompt.focus();
+  } else if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    event.target.form?.requestSubmit();
   }
 });
 elements.prompt.addEventListener("keydown", (event) => {
@@ -350,6 +654,7 @@ async function boot() {
     const savedSessionId = localStorage.getItem(SESSION_STORAGE_KEY);
     if (savedSessionId) {
       state.sessionId = savedSessionId;
+      state.headTurnId = localStorage.getItem(headStorageKey(savedSessionId));
       try {
         await loadSession();
       } catch {

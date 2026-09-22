@@ -1,6 +1,6 @@
 # Prompt 产品目标与实验假设
 
-状态：实验基线，目标已锁定
+状态：产品目标已锁定；WA2 多轮 prompt 配方暂时冻结，尚非通用验收
 
 ## 目标
 
@@ -52,6 +52,8 @@ MAS Chat 的最终 prompt 要复刻网页端的通用 assistant 体验，核心�
 
 在 Web-relaxed 通过上述评测前，不把 Constraint-heavy prompt 设为最终默认值。任何 prompt 改动都应整体审查和版本化，不能以“遇到一个失败就追加一句”的方式无限堆叠规则。
 
+当前暂时冻结的实验配方是：session 首轮 `web-relaxed-v3` 加 `session-following-v1`，后续每轮仅发送一次 `session-following-v1`；完整 native input/output history 仍由本地 journal 重放。不再针对 WA2 单个场景微调这两段 prompt。这里冻结的是已测试配方，不表示 CLI 的默认 base prompt 或本地 `.env` 已切换为 v3，也不代表其它任务类型已经通过验收。
+
 ## 2026-09-21 探索性 A/B/C
 
 使用相同的 WA2 开放式输入、`gpt-5.6-sol`、`reasoning.effort: xhigh`、`text.verbosity: medium` 和 hosted Web Search 配置，分别创建三个 fresh session：
@@ -78,6 +80,21 @@ MAS Chat 的最终 prompt 要复刻网页端的通用 assistant 体验，核心�
 v2 保留了更自然的承接语气，但相较 v1 明显失去续航。v3 保留 v2 的一句核心交互目标，增加一段“越过首个合理解释继续推进”的目标，并用一个长句压缩 v1 的通用底座。该次 v3 在 reasoning token 数与 v2 相同的情况下恢复到 v1 级别的输出长度，并继续推进到路线幽灵、闭包、垃圾回收、主体由关系生成、真实性与正当性分离、信息越充分越不可解，以及动画作为公式提出而非完整证明。
 
 这表明续航目标对该样本有强烈效果，同时没有恢复 v1 的高 reasoning token 消耗；但仍然只是单次 canary，不能据此判定 v3 在其它任务类型上稳定胜出。
+
+### 四轮连续 canary：session following
+
+Session `d85fac0d-c78c-4e2d-9d06-664939865a82` 使用 `gpt-5.6-sol`、`xhigh`、`medium`、Web Search，四轮均 background 完成、`store:false`。首轮将 v3 和 following-v1 合并为一次 `instructions`；此后三轮的 journal 均只记录 218 字符的 following-v1，没有重复 base 或累积先前的 following。
+
+| 轮次 | 输入主题 | 输出字符 | Reasoning tokens | Web Search calls |
+| --- | --- | ---: | ---: | ---: |
+| 1 | WA2 的关系性与 lambda calculus | 1856 | 516 | 0 |
+| 2 | 电话亭中的冬马 | 2973 | 5382 | 17 |
+| 3 | 双方的依赖、规范与自我实现 | 2906 | 1552 | 0 |
+| 4 | 客观关系与主观认识的错位；浮气 3905 | 4601 | 2719 | 5 |
+
+第四轮输入与用户文字逐字一致，引用集中在 Baka-Tsuki 的 `Script/3905`。回答沿前几轮的“交互协议—照顾者也被维持”继续推进，分析春希的身心失衡、二人自动恢复的日常分工、冬马的“两周”叙事，并进一步提出“认识不是解放而是判决”。没有过早收束成一句同意，也没有转为 agent 工作流；因此这条 WA2 轨迹的续航 canary 通过，可以暂时冻结上述配方。第三轮经 `pnpm` 传参时把 Markdown 换行变成了字面的 `\\n`；其内容可供观察，但不是输入格式完全保真的样本。
+
+边界：这是一条连续会话、每轮一次生成，不是跨主题、多次 fresh-run 的盲评；第四轮的具体文本解读和引文准确性尚未独立逐句核对。回答仍有分节较多、理论化较强的倾向，第二轮还出现了明显的搜索开销。冻结意味着暂停逐案追补 prompt 规则，而不是宣称产品默认 prompt 或通用质量已完成验证。
 
 ## 依据
 

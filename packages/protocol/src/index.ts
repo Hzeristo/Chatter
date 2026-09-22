@@ -53,10 +53,24 @@ export interface SessionCreatedRecord extends JournalRecordBase {
   kind: "session.created";
 }
 
+export type TurnForkKind = "edit" | "retry" | "transport_fallback";
+
+export interface TurnForkMetadata extends JsonObject {
+  kind: TurnForkKind;
+  sourceTurnId: string;
+}
+
+export interface TurnLineage extends JsonObject {
+  fork?: TurnForkMetadata;
+  parentTurnId: string | null;
+}
+
 export interface TurnInputRecord extends JournalRecordBase {
   configuration: RunConfigurationSnapshot;
   items: OpenAINativeItem[];
   kind: "turn.input";
+  /** Missing only on journals written before turn branching was introduced. */
+  lineage?: TurnLineage;
   turnId: string;
 }
 

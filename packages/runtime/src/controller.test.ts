@@ -324,6 +324,13 @@ describe("RunController", () => {
       expect(successfulTurn.configuration.instructions).toContain(
         "Continue the established conversation",
       );
+      expect(successfulTurn.lineage).toEqual({
+        parentTurnId: null,
+        fork: {
+          kind: "transport_fallback",
+          sourceTurnId: "turn-background",
+        },
+      });
     }
   });
 

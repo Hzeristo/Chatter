@@ -18,6 +18,7 @@ import {
   type RunStatus,
   type SessionMetadata,
   type TerminalStatus,
+  type TurnLineage,
   type TurnAbortedRecord,
   type TurnFailedRecord,
   type TurnInputRecord,
@@ -266,10 +267,22 @@ export class SessionStore {
     turnId: string,
     items: OpenAINativeItem[],
     configuration: RunConfigurationSnapshot,
+    lineage?: TurnLineage,
     now = new Date(),
   ): Promise<SessionMetadata> {
     assertSafeId(sessionId);
     assertSafeId(turnId);
+    if (lineage !== undefined) {
+      if (lineage.parentTurnId !== null) {
+        assertSafeId(lineage.parentTurnId);
+      }
+      if (lineage.fork !== undefined) {
+        assertSafeId(lineage.fork.sourceTurnId);
+      }
+      if (lineage.parentTurnId === turnId) {
+        throw new SessionStateError("A turn cannot be its own parent");
+      }
+    }
     if (configuration.store !== false) {
       throw new SessionStateError("MAS Chat requires store:false for every turn");
     }
@@ -294,6 +307,7 @@ export class SessionStore {
         at,
         items,
         configuration,
+        ...(lineage === undefined ? {} : { lineage }),
       };
       const { responseId: _previousResponseId, ...withoutResponseId } = current;
       const metadata: SessionMetadata = {

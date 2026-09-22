@@ -7,34 +7,28 @@ import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 
-import { loadConfig, requireApiKey, requestOptionsFromConfig } from "@mas-chat/cli/config";
-import type {
-  JournalRecord,
-  JsonObject,
-  NormalizedEvent,
-  OpenAINativeItem,
-} from "@mas-chat/protocol";
-import { OpenAIResponsesTransport, RunController } from "@mas-chat/runtime";
+import {
+  loadConfig,
+  requireApiKey,
+  requestOptionsFromConfig,
+} from "@mas-chat/cli/config";
+import type { NormalizedEvent, SessionMetadata } from "@mas-chat/protocol";
+import {
+  OpenAIResponsesTransport,
+  resolveTurns,
+  RunController,
+} from "@mas-chat/runtime";
 import { SessionStore } from "@mas-chat/storage";
+
+import {
+  createSessionView,
+  safeError,
+  type SessionView,
+} from "./session-view.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
-
-type SessionMessage = {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  phase?: "commentary" | "final_answer" | "unknown";
-};
-
-type SessionView = {
-  sessionId: string;
-  status: string;
-  responseId?: string;
-  lastSequenceNumber: number;
-  messages: SessionMessage[];
-};
 
 type SessionListItem = {
   sessionId: string;
@@ -46,125 +40,13 @@ type SessionListItem = {
   messageCount: number;
 };
 
+type TurnRequest = {
+  parentTurnId?: string | null;
+  prompt: string;
+};
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function textValue(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value.map(textValue).join("");
-  }
-  if (isObject(value)) {
-    return stringValue(value.text) ?? "";
-  }
-  return "";
-}
-
-function itemText(item: OpenAINativeItem): string {
-  return textValue(item.content);
-}
-
-function phaseValue(item: OpenAINativeItem): SessionMessage["phase"] {
-  const phase = stringValue(item.phase);
-  return phase === "commentary" || phase === "final_answer" ? phase : "unknown";
-}
-
-function safeError(error: unknown): JsonObject {
-  if (!(error instanceof Error)) {
-    return { name: "UnknownError", message: String(error) };
-  }
-  const details = error as Error & { code?: unknown; status?: unknown };
-  return {
-    name: error.name,
-    message: error.message,
-    ...(typeof details.code === "string" ? { code: details.code } : {}),
-    ...(typeof details.status === "number" ? { status: details.status } : {}),
-  };
-}
-
-function sessionView(
-  sessionId: string,
-  metadata: Awaited<ReturnType<SessionStore["loadMetadata"]>>,
-  records: JournalRecord[],
-): SessionView {
-  const messages: SessionMessage[] = [];
-
-  for (const record of records) {
-    if (record.kind === "turn.input") {
-      record.items.forEach((item, index) => {
-        const role = stringValue(item.role);
-        const text = itemText(item);
-        if (role === "user" && text !== "") {
-          messages.push({
-            id: `${record.turnId}:user:${index}`,
-            role: "user",
-            text,
-          });
-        }
-      });
-      continue;
-    }
-
-    if (record.kind === "turn.output") {
-      record.items.forEach((item, index) => {
-        if (item.type !== "message") {
-          return;
-        }
-        const text = itemText(item);
-        if (text === "") {
-          return;
-        }
-        const message: SessionMessage = {
-          id: stringValue(item.id) ?? `${record.turnId}:assistant:${index}`,
-          role: "assistant",
-          text,
-        };
-        const phase = phaseValue(item);
-        if (phase !== undefined) {
-          message.phase = phase;
-        }
-        messages.push(message);
-      });
-    }
-  }
-
-  return {
-    sessionId,
-    status: metadata.status,
-    ...(metadata.responseId === undefined
-      ? {}
-      : { responseId: metadata.responseId }),
-    lastSequenceNumber: metadata.lastSequenceNumber,
-    messages,
-  };
-}
-
-async function sessionListItem(
-  store: SessionStore,
-  metadata: Awaited<ReturnType<SessionStore["loadMetadata"]>>,
-): Promise<SessionListItem> {
-  const records = await store.readJournal(metadata.sessionId);
-  const view = sessionView(metadata.sessionId, metadata, records);
-  const firstUserMessage = view.messages.find((message) => message.role === "user");
-  const preview = firstUserMessage?.text.trim().replace(/\s+/g, " ");
-  return {
-    sessionId: metadata.sessionId,
-    status: metadata.status,
-    createdAt: metadata.createdAt,
-    updatedAt: metadata.updatedAt,
-    lastSequenceNumber: metadata.lastSequenceNumber,
-    ...(preview === undefined || preview === ""
-      ? {}
-      : { preview: preview.slice(0, 96) }),
-    messageCount: view.messages.length,
-  };
 }
 
 function jsonHeaders(contentType = "application/json; charset=utf-8") {
@@ -219,7 +101,7 @@ async function readBody(request: http.IncomingMessage): Promise<unknown> {
   }
 }
 
-function requestPrompt(body: unknown): string {
+function parseTurnRequest(body: unknown): TurnRequest {
   if (!isObject(body) || typeof body.prompt !== "string") {
     throw new Error("Request body must contain a prompt string");
   }
@@ -227,7 +109,18 @@ function requestPrompt(body: unknown): string {
   if (prompt === "") {
     throw new Error("Prompt must not be empty");
   }
-  return prompt;
+  const rawParent = body.parentTurnId;
+  if (
+    rawParent !== undefined &&
+    rawParent !== null &&
+    typeof rawParent !== "string"
+  ) {
+    throw new Error("parentTurnId must be a string or null");
+  }
+  return {
+    prompt,
+    ...(rawParent === undefined ? {} : { parentTurnId: rawParent }),
+  };
 }
 
 function streamHeaders() {
@@ -278,13 +171,17 @@ async function streamEvents(
 
 function statusForError(error: unknown): number {
   const message = error instanceof Error ? error.message : String(error);
-  if (/not found|no such file|invalid session/i.test(message)) {
+  if (/not found|no such file|invalid session|unknown (?:visible )?turn/i.test(message)) {
     return 404;
   }
-  if (/already has active|no resumable|no cancellable/i.test(message)) {
+  if (
+    /already has active|different active|no resumable|no cancellable|still running/i.test(
+      message,
+    )
+  ) {
     return 409;
   }
-  if (/request body|prompt|too large/i.test(message)) {
+  if (/request body|prompt|parentTurnId|too large/i.test(message)) {
     return 400;
   }
   return 500;
@@ -300,6 +197,8 @@ function contentType(filePath: string): string {
       return "text/css; charset=utf-8";
     case ".json":
       return "application/json; charset=utf-8";
+    case ".woff2":
+      return "font/woff2";
     default:
       return "application/octet-stream";
   }
@@ -322,8 +221,9 @@ async function serveStatic(
     const body = await readFile(filePath);
     response.writeHead(200, {
       "Content-Type": contentType(filePath),
-      "Cache-Control": pathname === "/" ? "no-cache" : "public, max-age=60",
-      "Content-Security-Policy": "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'",
+      "Cache-Control": "no-cache",
+      "Content-Security-Policy":
+        "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'",
     });
     response.end(body);
   } catch {
@@ -346,9 +246,10 @@ function configView(config: ReturnType<typeof loadConfig>) {
   };
 }
 
-function createApplication() {
+async function main(): Promise<void> {
   const config = loadConfig();
   const store = new SessionStore(config.dataDirectory);
+  const activeRuns = new Set<string>();
   let controller: RunController | undefined;
 
   function getController(): RunController {
@@ -364,23 +265,173 @@ function createApplication() {
     return controller;
   }
 
-  return { config, store, getController };
-}
+  async function reconcileSession(sessionId: string): Promise<{
+    metadata: SessionMetadata;
+    records: Awaited<ReturnType<SessionStore["readJournal"]>>;
+  }> {
+    let metadata = await store.loadMetadata(sessionId);
+    let records = await store.readJournal(sessionId);
+    if (
+      metadata.activeTurnId !== undefined &&
+      !activeRuns.has(sessionId)
+    ) {
+      const activeInput = records.find(
+        (record) =>
+          record.kind === "turn.input" &&
+          record.turnId === metadata.activeTurnId,
+      );
+      const orphanError =
+        activeInput?.kind !== "turn.input"
+          ? {
+              name: "ActiveTurnInputMissing",
+              message: "The active turn has no persisted input record",
+            }
+          : !activeInput.configuration.background
+            ? {
+                name: "ForegroundRunOrphaned",
+                message:
+                  "The foreground response lost its owning server process and cannot be resumed",
+              }
+            : metadata.responseId === undefined
+              ? {
+                  name: "ResponseIdUnavailable",
+                  message:
+                    "The background response ID was not persisted before its owning server process stopped",
+                }
+              : undefined;
+      if (orphanError !== undefined) {
+        await store.failTurn(sessionId, metadata.activeTurnId, {
+          ...orphanError,
+        });
+        metadata = await store.loadMetadata(sessionId);
+        records = await store.readJournal(sessionId);
+      }
+    }
+    return { metadata, records };
+  }
 
-async function main(): Promise<void> {
-  const { config, store, getController } = createApplication();
+  async function loadSessionView(
+    sessionId: string,
+    selectedHeadTurnId?: string,
+  ): Promise<SessionView> {
+    const { metadata, records } = await reconcileSession(sessionId);
+    return createSessionView(
+      sessionId,
+      metadata,
+      records,
+      selectedHeadTurnId,
+      activeRuns.has(sessionId),
+    );
+  }
+
+  async function supersedeActiveTurn(
+    sessionId: string,
+    turnId: string,
+    background: boolean,
+    reason: "continuation" | "retry",
+  ): Promise<void> {
+    const metadata = await store.loadMetadata(sessionId);
+    if (metadata.activeTurnId === undefined) {
+      return;
+    }
+    if (activeRuns.has(sessionId)) {
+      throw new Error(`Session ${sessionId} is still running locally`);
+    }
+    if (metadata.activeTurnId !== turnId) {
+      throw new Error(`Session ${sessionId} has a different active turn`);
+    }
+
+    const failureName =
+      reason === "retry"
+        ? "TurnSupersededByRetry"
+        : "TurnSupersededByContinuation";
+    if (metadata.responseId !== undefined && background) {
+      try {
+        await getController().cancel(sessionId);
+        return;
+      } catch (error) {
+        const afterCancel = await store.loadMetadata(sessionId);
+        if (afterCancel.activeTurnId === undefined) {
+          return;
+        }
+        if (afterCancel.activeTurnId !== turnId) {
+          throw error;
+        }
+        const cancelError = safeError(error);
+        await store.failTurn(sessionId, turnId, {
+          name: failureName,
+          message: `The unfinished response was superseded by user ${reason} after remote cancellation failed`,
+          cancelError,
+        });
+        process.stderr.write(
+          `Remote cancellation failed for ${sessionId}/${turnId}: ${String(cancelError.message ?? "unknown error")}\n`,
+        );
+        return;
+      }
+    }
+
+    await store.failTurn(sessionId, turnId, {
+      name: failureName,
+      message: `The unfinished response was superseded by user ${reason}`,
+    });
+  }
+
+  async function sessionListItem(
+    metadata: SessionMetadata,
+  ): Promise<SessionListItem> {
+    const view = await loadSessionView(metadata.sessionId);
+    const firstUserMessage = view.messages.find(
+      (message) => message.role === "user",
+    );
+    const preview = firstUserMessage?.text.trim().replace(/\s+/g, " ");
+    const currentMetadata = await store.loadMetadata(metadata.sessionId);
+    return {
+      sessionId: metadata.sessionId,
+      status: view.status,
+      createdAt: currentMetadata.createdAt,
+      updatedAt: currentMetadata.updatedAt,
+      lastSequenceNumber: currentMetadata.lastSequenceNumber,
+      ...(preview === undefined || preview === ""
+        ? {}
+        : { preview: preview.slice(0, 96) }),
+      messageCount: view.messages.filter(
+        (message) => !message.id.endsWith(":status"),
+      ).length,
+    };
+  }
+
+  async function runStream(
+    sessionId: string,
+    response: http.ServerResponse,
+    events: AsyncIterable<NormalizedEvent>,
+  ): Promise<void> {
+    if (activeRuns.has(sessionId)) {
+      throw new Error(`Session ${sessionId} is still running locally`);
+    }
+    activeRuns.add(sessionId);
+    try {
+      await streamEvents(response, events);
+    } finally {
+      activeRuns.delete(sessionId);
+    }
+  }
+
   const publicDirectory = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     "public",
   );
   const host = process.env.MAS_CHAT_WEB_HOST?.trim() || DEFAULT_HOST;
   const configuredPort = Number(process.env.MAS_CHAT_WEB_PORT ?? DEFAULT_PORT);
-  const port = Number.isInteger(configuredPort) && configuredPort > 0
-    ? configuredPort
-    : DEFAULT_PORT;
+  const port =
+    Number.isInteger(configuredPort) && configuredPort > 0
+      ? configuredPort
+      : DEFAULT_PORT;
 
   const server = http.createServer(async (request, response) => {
-    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? host}`);
+    const url = new URL(
+      request.url ?? "/",
+      `http://${request.headers.host ?? host}`,
+    );
     const pathname = url.pathname;
 
     try {
@@ -398,9 +449,7 @@ async function main(): Promise<void> {
 
       if (request.method === "GET" && pathname === "/api/sessions") {
         const metadata = await store.listSessions();
-        const sessions = await Promise.all(
-          metadata.map((item) => sessionListItem(store, item)),
-        );
+        const sessions = await Promise.all(metadata.map(sessionListItem));
         sendJson(response, 200, { sessions });
         return;
       }
@@ -408,22 +457,142 @@ async function main(): Promise<void> {
       const sessionMatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
       if (request.method === "GET" && sessionMatch?.[1] !== undefined) {
         const sessionId = decodeURIComponent(sessionMatch[1]);
-        const metadata = await store.loadMetadata(sessionId);
-        const records = await store.readJournal(sessionId);
-        sendJson(response, 200, sessionView(sessionId, metadata, records));
+        const selectedHead = url.searchParams.get("head") ?? undefined;
+        sendJson(
+          response,
+          200,
+          await loadSessionView(sessionId, selectedHead),
+        );
+        return;
+      }
+
+      const retryMatch = pathname.match(
+        /^\/api\/sessions\/([^/]+)\/turns\/([^/]+)\/retry$/,
+      );
+      if (request.method === "POST" && retryMatch?.[1] !== undefined) {
+        const sessionId = decodeURIComponent(retryMatch[1]);
+        const sourceTurnId = decodeURIComponent(retryMatch[2] ?? "");
+        let { metadata, records } = await reconcileSession(sessionId);
+        let source = resolveTurns(records).find(
+          (turn) => turn.input.turnId === sourceTurnId,
+        );
+        if (source === undefined) {
+          throw new Error(`Unknown turn ${sourceTurnId}`);
+        }
+        if (metadata.activeTurnId !== undefined) {
+          await supersedeActiveTurn(
+            sessionId,
+            sourceTurnId,
+            source.input.configuration.background,
+            "retry",
+          );
+          metadata = await store.loadMetadata(sessionId);
+          records = await store.readJournal(sessionId);
+          source = resolveTurns(records).find(
+            (turn) => turn.input.turnId === sourceTurnId,
+          );
+          if (source === undefined) {
+            throw new Error(`Unknown turn ${sourceTurnId}`);
+          }
+        }
+
+        const input = source.input.items as unknown as ResponseInputItem[];
+        await runStream(
+          sessionId,
+          response,
+          getController().start(input, {
+            sessionId,
+            ...requestOptionsFromConfig(config),
+            parentTurnId: source.parentTurnId,
+            fork: { kind: "retry", sourceTurnId },
+          }),
+        );
+        return;
+      }
+
+      const editMatch = pathname.match(
+        /^\/api\/sessions\/([^/]+)\/turns\/([^/]+)\/edit$/,
+      );
+      if (request.method === "POST" && editMatch?.[1] !== undefined) {
+        const sessionId = decodeURIComponent(editMatch[1]);
+        const sourceTurnId = decodeURIComponent(editMatch[2] ?? "");
+        const edited = parseTurnRequest(await readBody(request));
+        let { metadata, records } = await reconcileSession(sessionId);
+        let source = resolveTurns(records).find(
+          (turn) => turn.input.turnId === sourceTurnId,
+        );
+        if (source === undefined) {
+          throw new Error(`Unknown turn ${sourceTurnId}`);
+        }
+        if (metadata.activeTurnId !== undefined) {
+          await supersedeActiveTurn(
+            sessionId,
+            sourceTurnId,
+            source.input.configuration.background,
+            "retry",
+          );
+          metadata = await store.loadMetadata(sessionId);
+          records = await store.readJournal(sessionId);
+          source = resolveTurns(records).find(
+            (turn) => turn.input.turnId === sourceTurnId,
+          );
+          if (source === undefined) {
+            throw new Error(`Unknown turn ${sourceTurnId}`);
+          }
+        }
+
+        const input = [
+          { role: "user", content: edited.prompt },
+        ] as ResponseInputItem[];
+        await runStream(
+          sessionId,
+          response,
+          getController().start(input, {
+            sessionId,
+            ...requestOptionsFromConfig(config),
+            parentTurnId: source.parentTurnId,
+            fork: { kind: "edit", sourceTurnId },
+          }),
+        );
         return;
       }
 
       const turnMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/turn$/);
       if (request.method === "POST" && turnMatch?.[1] !== undefined) {
         const sessionId = decodeURIComponent(turnMatch[1]);
-        const prompt = requestPrompt(await readBody(request));
-        const input = [{ role: "user", content: prompt }] as ResponseInputItem[];
-        await streamEvents(
+        const turn = parseTurnRequest(await readBody(request));
+        const { metadata, records } = await reconcileSession(sessionId);
+        if (metadata.activeTurnId !== undefined) {
+          if (turn.parentTurnId !== metadata.activeTurnId) {
+            throw new Error(
+              `Session ${sessionId} has a different active turn than parentTurnId`,
+            );
+          }
+          const active = resolveTurns(records).find(
+            (candidate) => candidate.input.turnId === metadata.activeTurnId,
+          );
+          if (active === undefined) {
+            throw new Error(`Unknown turn ${metadata.activeTurnId}`);
+          }
+          await supersedeActiveTurn(
+            sessionId,
+            metadata.activeTurnId,
+            active.input.configuration.background,
+            "continuation",
+          );
+        }
+        const input = [
+          { role: "user", content: turn.prompt },
+        ] as ResponseInputItem[];
+        await runStream(
+          sessionId,
           response,
           getController().start(input, {
             sessionId,
             ...requestOptionsFromConfig(config),
+            ...(turn.parentTurnId === undefined
+              ? {}
+              : { parentTurnId: turn.parentTurnId }),
           }),
         );
         return;
@@ -432,7 +601,11 @@ async function main(): Promise<void> {
       const attachMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/attach$/);
       if (request.method === "GET" && attachMatch?.[1] !== undefined) {
         const sessionId = decodeURIComponent(attachMatch[1]);
-        await streamEvents(response, getController().attach(sessionId));
+        await runStream(
+          sessionId,
+          response,
+          getController().attach(sessionId),
+        );
         return;
       }
 
@@ -468,6 +641,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  process.stderr.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(
+    `Error: ${error instanceof Error ? error.message : String(error)}\n`,
+  );
   process.exitCode = 1;
 });

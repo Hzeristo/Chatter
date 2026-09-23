@@ -1,8 +1,13 @@
 import katex from "katex";
-import { marked } from "marked";
+import splitAtDelimiters from "katex/contrib/auto-render/splitAtDelimiters.ts";
+import { Marked } from "marked";
+import { Editor } from "@tiptap/core";
+import { Mathematics } from "@tiptap/extension-mathematics";
+import { Markdown } from "@tiptap/markdown";
+import Placeholder from "@tiptap/extension-placeholder";
+import StarterKit from "@tiptap/starter-kit";
 
 const elements = {
-  badge: document.querySelector("#config-badge"),
   cancelFork: document.querySelector("#cancel-fork"),
   composer: document.querySelector("#composer"),
   empty: document.querySelector("#empty-state"),
@@ -10,11 +15,9 @@ const elements = {
   messages: document.querySelector("#messages"),
   newSession: document.querySelector("#new-session"),
   prompt: document.querySelector("#prompt"),
-  promptPreview: document.querySelector("#prompt-preview"),
   send: document.querySelector("#send"),
   stop: document.querySelector("#stop"),
-  sessionSelect: document.querySelector("#session-select"),
-  sessionLabel: document.querySelector("#session-label"),
+  sessionList: document.querySelector("#session-list"),
   status: document.querySelector("#status"),
 };
 
@@ -25,6 +28,7 @@ const state = {
   canContinue: true,
   canStop: false,
   assistantNodes: new Map(),
+  reasoningNodes: new Map(),
   userMessages: new Map(),
   editingTurnId: null,
   forkSourceTurnId: null,
@@ -33,15 +37,263 @@ const state = {
   stopRequested: false,
 };
 const SESSION_STORAGE_KEY = "mas-chat.session-id";
+const markdownEditors = new WeakMap();
+const mathDelimiters = [
+  { left: "$$", right: "$$", display: true },
+  { left: "\\[", right: "\\]", display: true },
+  { left: "\\(", right: "\\)", display: false },
+  { left: "$", right: "$", display: false },
+];
+const richTextMarkdown = new Marked({
+  breaks: true,
+  gfm: true,
+  renderer: { html: ({ text }) => escapeHtml(text) },
+  extensions: [createMathExtension("block"), createMathExtension("inline")],
+});
+
+function visibleOffsetAtCursor(source, rendered, cursor) {
+  let renderedOffset = 0;
+  for (const character of source.slice(0, cursor)) {
+    if (character === rendered[renderedOffset]) renderedOffset += 1;
+  }
+  return renderedOffset;
+}
+
+function parseMarkdownAtCursor(editor) {
+  const { selection } = editor.state;
+  if (!selection.empty) return null;
+  const { $from } = selection;
+  const block = $from.parent;
+  if (!block.isTextblock || block.type.name === "codeBlock") return null;
+  let textNode = null;
+  let textOffset = 0;
+  block.forEach((node, offset) => {
+    if (!node.isText || node.marks.length > 0) return;
+    if ($from.parentOffset < offset || $from.parentOffset > offset + node.nodeSize) return;
+    textNode = node;
+    textOffset = offset;
+  });
+  if (!textNode) return null;
+
+  const source = textNode.text.trim();
+  if (!source) return null;
+  const leadingWhitespace = textNode.text.length - textNode.text.trimStart().length;
+  const contentStart = $from.start() + textOffset + leadingWhitespace;
+  const contentEnd = contentStart + source.length;
+  if ($from.pos < contentStart || $from.pos > contentEnd) return null;
+  const parsedDocument = editor.schema.nodeFromJSON(editor.markdown.parse(source));
+  const parsedBlock = parsedDocument.firstChild;
+  if (parsedDocument.childCount !== 1 || parsedBlock?.type.name !== "paragraph") return null;
+  const originalContent = block.content.cut(contentStart - $from.start(), contentEnd - $from.start());
+  if (parsedBlock.content.eq(originalContent)) return null;
+
+  const cursorOffset = $from.pos - contentStart;
+  const nextCursor = contentStart + visibleOffsetAtCursor(source, parsedBlock.textContent, cursorOffset);
+  return { parsedBlock, contentStart, contentEnd, nextCursor };
+}
+
+function normalizeMarkdownInput(editor) {
+  const parsed = parseMarkdownAtCursor(editor);
+  if (!parsed) return;
+  editor.chain()
+    .command(({ tr }) => {
+      tr.replaceWith(parsed.contentStart, parsed.contentEnd, parsed.parsedBlock.content);
+      return true;
+    })
+    .setTextSelection(parsed.nextCursor)
+    .command(({ tr }) => {
+      tr.setStoredMarks(tr.selection.$from.marks());
+      return true;
+    })
+    .run();
+}
+
+function insertSpaceAndExitMarks(view, from, to) {
+  if (from !== to || view.composing) return false;
+  const activeMarks = view.state.storedMarks ?? view.state.doc.resolve(from).marks();
+  if (activeMarks.length === 0 || activeMarks.some((mark) => mark.type.spec.code)) return false;
+  view.dispatch(view.state.tr
+    .setStoredMarks([])
+    .insertText(" ", from, to)
+    .setStoredMarks([])
+    .scrollIntoView());
+  return true;
+}
+
+function createMarkdownEditor(host, { initialValue = "", minHeight = "30px", onSubmit, onCancel } = {}) {
+  let editor;
+  let skipNormalization = false;
+  let normalizing = false;
+  let compositionActive = false;
+  let compositionEndTimer = null;
+  let hasPendingInput = false;
+
+  function flushMarkdownInput() {
+    if (!hasPendingInput || normalizing || compositionActive || editor.isDestroyed || editor.view.composing) return;
+    hasPendingInput = false;
+    normalizing = true;
+    try {
+      if (editor.isEmpty) {
+        if (editor.state.storedMarks?.length) {
+          editor.view.dispatch(editor.state.tr.setStoredMarks([]));
+        }
+      } else if (!skipNormalization) {
+        normalizeMarkdownInput(editor);
+      }
+    } finally {
+      normalizing = false;
+    }
+  }
+
+  function beginComposition() {
+    compositionActive = true;
+    window.clearTimeout(compositionEndTimer);
+    compositionEndTimer = null;
+    return false;
+  }
+
+  const mathematics = Mathematics.configure({
+    inlineOptions: {
+      onClick: (node, pos) => {
+        if (!editor) return;
+        skipNormalization = true;
+        editor.chain().focus().insertContentAt(
+          { from: pos, to: pos + node.nodeSize },
+          `$${node.attrs.latex}$`,
+        ).run();
+        queueMicrotask(() => { skipNormalization = false; });
+      },
+    },
+    katexOptions: { throwOnError: false },
+  });
+  editor = new Editor({
+    element: host,
+    injectCSS: false,
+    extensions: [
+      StarterKit,
+      Markdown,
+      mathematics,
+      Placeholder.configure({ placeholder: "输入消息……" }),
+    ],
+    content: initialValue,
+    contentType: "markdown",
+    autofocus: false,
+    editorProps: {
+      attributes: {
+        class: "tiptap-editor",
+        role: "textbox",
+        "aria-multiline": "true",
+      },
+      handleDOMEvents: {
+        compositionstart: beginComposition,
+        compositionupdate: beginComposition,
+        compositionend: () => {
+          window.clearTimeout(compositionEndTimer);
+          compositionEndTimer = window.setTimeout(() => {
+            compositionEndTimer = null;
+            compositionActive = false;
+            flushMarkdownInput();
+          }, 30);
+          return false;
+        },
+      },
+      handleTextInput: (view, from, to, text) => {
+        if (compositionActive || (text !== " " && text !== "\u00a0")) return false;
+        return insertSpaceAndExitMarks(view, from, to);
+      },
+      handleKeyDown: (view, event) => {
+        if (compositionActive || event.isComposing || view.composing || event.keyCode === 229) return false;
+        if (event.key === " " && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          const { from, to } = view.state.selection;
+          if (insertSpaceAndExitMarks(view, from, to)) return true;
+        }
+        if (event.key === "Escape" && view.state.selection.empty) {
+          const activeMarks = view.state.storedMarks ?? view.state.selection.$from.marks();
+          if (activeMarks.length > 0) {
+            view.dispatch(view.state.tr.setStoredMarks([]));
+            return true;
+          }
+        }
+        if (event.key === "Escape" && onCancel) {
+          onCancel();
+          return true;
+        }
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+          skipNormalization = true;
+          window.setTimeout(() => { skipNormalization = false; }, 0);
+        }
+        return false;
+      },
+    },
+  });
+  editor.on("update", ({ transaction }) => {
+    if (normalizing || !transaction.docChanged) return;
+    hasPendingInput = true;
+    flushMarkdownInput();
+  });
+  editor.on("destroy", () => {
+    window.clearTimeout(compositionEndTimer);
+  });
+  host.style.setProperty("--editor-min-height", minHeight);
+  host.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229 || compositionActive || editor.view.composing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSubmit?.();
+  }, true);
+  markdownEditors.set(host, editor);
+  return editor;
+}
+
+function destroyMarkdownEditor(host) {
+  markdownEditors.get(host)?.destroy();
+  markdownEditors.delete(host);
+}
+
+const promptEditor = createMarkdownEditor(elements.prompt, {
+  onSubmit: () => elements.composer.requestSubmit(),
+});
 
 function headStorageKey(sessionId) {
   return `mas-chat.session-head.${sessionId}`;
 }
 
-function escapedMarkdownSource(source) {
-  // Raw HTML is not part of the chat rendering contract. Escaping `<` keeps
-  // Markdown syntax (including blockquotes) while preventing HTML injection.
-  return source.replaceAll("&", "&amp;").replaceAll("<", "&lt;");
+function escapeHtml(source) {
+  return source.replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+
+function createMathExtension(level) {
+  const name = level === "block" ? "blockMath" : "inlineMath";
+  return {
+    name,
+    level,
+    start(source) {
+      const pattern = level === "block" ? /^ {0,3}(?:\$\$|\\\[)/m : /\$|\\[([]/;
+      const index = source.search(pattern);
+      return index < 0 ? undefined : index;
+    },
+    tokenizer(source) {
+      const indentation = level === "block" ? source.match(/^ {0,3}/)[0].length : 0;
+      const mathSource = source.slice(indentation);
+      const delimiter = mathDelimiters.find((entry) => mathSource.startsWith(entry.left));
+      if (!delimiter || (level === "block" && !delimiter.display)) return;
+      const [formula] = splitAtDelimiters(mathSource, [delimiter]);
+      if (formula?.type !== "math" || !formula.data.trim()) return;
+      if (delimiter.left === "$" && /\n|^\s|\s$/.test(formula.data)) return;
+      if (level === "block" && !/^[ \t]*(?:\n|$)/.test(mathSource.slice(formula.rawData.length))) return;
+      return {
+        type: name,
+        raw: source.slice(0, indentation + formula.rawData.length),
+        text: formula.data,
+        display: formula.display,
+      };
+    },
+    renderer(token) {
+      const tag = level === "block" ? "div" : "span";
+      return `<${tag} class="rendered-math" data-latex="${escapeHtml(token.text)}" data-display="${token.display}"></${tag}>`;
+    },
+  };
 }
 
 function sanitizeFragment(fragment) {
@@ -63,73 +315,33 @@ function sanitizeFragment(fragment) {
   }
 }
 
-function renderInlineMath(root) {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  const textNodes = [];
-  let current;
-  while ((current = walker.nextNode())) {
-    const parent = current.parentElement;
-    if (parent && !parent.closest("code, pre, .katex")) {
-      textNodes.push(current);
-    }
-  }
-
-  const pattern = /\\\(([\s\S]+?)\\\)|(?<!\\)\$([^$\n]+?)(?<!\\)\$/g;
-  for (const textNode of textNodes) {
-    const source = textNode.nodeValue ?? "";
-    pattern.lastIndex = 0;
-    let lastIndex = 0;
-    let changed = false;
-    const replacement = document.createDocumentFragment();
-    let match;
-    while ((match = pattern.exec(source)) !== null) {
-      const tex = match[1] ?? match[2];
-      if (tex === undefined || tex.trim() === "") continue;
-      changed = true;
-      if (match.index > lastIndex) {
-        replacement.append(source.slice(lastIndex, match.index));
-      }
-      const math = document.createElement("span");
-      math.innerHTML = katex.renderToString(tex, {
-        displayMode: false,
-        output: "htmlAndMathml",
-        throwOnError: false,
-      });
-      replacement.append(...math.childNodes);
-      lastIndex = pattern.lastIndex;
-    }
-    if (!changed) continue;
-    if (lastIndex < source.length) replacement.append(source.slice(lastIndex));
-    textNode.replaceWith(replacement);
-  }
-}
-
 function renderRichText(element, source) {
-  const html = marked.parse(escapedMarkdownSource(source), {
-    breaks: true,
-    gfm: true,
-  });
   const template = document.createElement("template");
-  template.innerHTML = html;
+  template.innerHTML = richTextMarkdown.parse(source);
   sanitizeFragment(template.content);
   element.replaceChildren(template.content.cloneNode(true));
-  renderInlineMath(element);
+  for (const math of element.querySelectorAll(".rendered-math")) {
+    katex.render(math.dataset.latex, math, {
+      displayMode: math.dataset.display === "true",
+      output: "htmlAndMathml",
+      throwOnError: false,
+      trust: false,
+    });
+  }
 }
 
 function setStatus(status) {
   elements.status.textContent = status;
-  elements.sessionLabel.textContent = state.forkSourceTurnId
-    ? `从 ${state.forkSourceTurnId.slice(0, 8)} 分支`
-    : state.sessionId
-      ? `session ${state.sessionId.slice(0, 8)}`
-      : "准备会话中";
   elements.cancelFork.hidden = state.forkSourceTurnId === null;
 }
 
 function updateComposerState() {
   const disabled = state.running || !state.canContinue || state.editingTurnId !== null;
-  elements.prompt.disabled = disabled;
+  promptEditor.setEditable(!disabled);
+  elements.prompt.toggleAttribute("inert", disabled);
+  elements.prompt.setAttribute("aria-disabled", String(disabled));
   elements.send.disabled = disabled;
+  elements.send.hidden = state.canStop;
   elements.stop.hidden = !state.canStop;
   elements.stop.disabled = !state.canStop || state.stopRequested;
 }
@@ -143,40 +355,94 @@ function formatSessionOption(session) {
 
 async function refreshSessionList() {
   const result = await requestJson("/api/sessions");
-  elements.sessionSelect.replaceChildren();
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = "选择已有会话";
-  elements.sessionSelect.append(placeholder);
-  for (const session of result.sessions) {
-    const option = document.createElement("option");
-    option.value = session.sessionId;
-    option.textContent = formatSessionOption(session);
+  elements.sessionList.replaceChildren();
+  for (const session of result.sessions ?? []) {
+    const option = document.createElement("div");
+    option.className = "session-option";
+    option.dataset.sessionId = session.sessionId;
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", String(session.sessionId === state.sessionId));
+    option.classList.toggle("selected", session.sessionId === state.sessionId);
     option.title = session.sessionId;
-    option.selected = session.sessionId === state.sessionId;
-    elements.sessionSelect.append(option);
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "session-open";
+    open.dataset.sessionId = session.sessionId;
+    const preview = document.createElement("span");
+    preview.className = "session-option-preview";
+    preview.textContent = session.preview || "空会话";
+    const meta = document.createElement("span");
+    meta.className = "session-option-meta";
+    const date = new Date(session.updatedAt);
+    meta.textContent = Number.isNaN(date.valueOf()) ? "" : date.toLocaleString();
+    open.append(preview, meta);
+    const archive = document.createElement("button");
+    archive.type = "button";
+    archive.className = "session-archive-button";
+    archive.dataset.action = "archive";
+    archive.dataset.sessionId = session.sessionId;
+    archive.setAttribute("aria-label", "归档会话");
+    archive.title = "归档会话";
+    archive.textContent = "↓";
+    option.append(open, archive);
+    elements.sessionList.append(option);
   }
 }
 
 function addActivity(label, text = "") {
+  const follow = elements.log.scrollHeight - elements.log.scrollTop - elements.log.clientHeight < 36;
   const row = document.createElement("div");
   row.className = "activity-entry";
   const strong = document.createElement("strong");
   strong.textContent = label;
-  row.append(strong, text ? `  ${text}` : "");
+  row.append(strong);
+  const content = document.createElement("div");
+  content.className = "activity-content";
+  if (text) {
+    renderRichText(content, text);
+    row.append(content);
+  }
   elements.log.append(row);
-  elements.log.scrollTop = elements.log.scrollHeight;
+  if (follow) elements.log.scrollTop = elements.log.scrollHeight;
+  return content;
+}
+
+function updateReasoning(event) {
+  if (!event.delta) return;
+  const key = JSON.stringify([event.responseId, event.itemId]);
+  let node = state.reasoningNodes.get(key);
+  if (!node) {
+    node = {
+      content: addActivity("推理摘要", event.delta),
+      raw: event.delta,
+      sequenceNumber: event.sequenceNumber,
+    };
+    state.reasoningNodes.set(key, node);
+    return;
+  }
+  if (event.sequenceNumber <= node.sequenceNumber) return;
+  const follow = elements.log.scrollHeight - elements.log.scrollTop - elements.log.clientHeight < 36;
+  node.raw += event.delta;
+  node.sequenceNumber = event.sequenceNumber;
+  renderRichText(node.content, node.raw);
+  if (follow) elements.log.scrollTop = elements.log.scrollHeight;
+}
+
+function clearActivityLog() {
+  elements.log.replaceChildren();
+  state.reasoningNodes.clear();
 }
 
 function clearConversation() {
+  closeEditTurn();
   elements.messages.replaceChildren();
   elements.empty = null;
   state.assistantNodes.clear();
   state.userMessages.clear();
-  state.editingTurnId = null;
 }
 
 function addMessage(message) {
+  const follow = elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight < 80;
   const wrapper = document.createElement("article");
   wrapper.className = `message ${message.role}${message.phase === "commentary" ? " commentary" : ""}`;
   wrapper.dataset.messageId = message.id;
@@ -259,20 +525,22 @@ function addMessage(message) {
     wrapper.classList.add("partial");
   }
   elements.messages.append(wrapper);
-  elements.messages.scrollTop = elements.messages.scrollHeight;
+  if (follow) elements.messages.scrollTop = elements.messages.scrollHeight;
   return node;
 }
 
-function resizeEditInput(input) {
-  input.style.height = "auto";
-  input.style.height = `${Math.min(Math.max(input.scrollHeight, 96), 420)}px`;
+function scrollMessagesToBottom() {
+  elements.messages.scrollTop = elements.messages.scrollHeight;
 }
 
 function closeEditTurn() {
   if (state.editingTurnId === null) return;
   const message = state.userMessages.get(state.editingTurnId);
   if (message) {
-    message.wrapper.querySelector(".message-edit-form")?.remove();
+    const form = message.wrapper.querySelector(".message-edit-form");
+    const input = form?.querySelector(".message-edit-input");
+    if (input) destroyMarkdownEditor(input);
+    form?.remove();
     message.bubble.hidden = false;
     const actions = message.wrapper.querySelector(".message-actions");
     if (actions) actions.hidden = false;
@@ -290,9 +558,8 @@ function beginEditTurn(turnId) {
   const form = document.createElement("form");
   form.className = "message-edit-form";
   form.dataset.turnId = turnId;
-  const input = document.createElement("textarea");
-  input.className = "message-edit-input";
-  input.value = message.text;
+  const input = document.createElement("div");
+  input.className = "message-edit-input markdown-editor-host";
   input.setAttribute("aria-label", "编辑消息");
 
   const footer = document.createElement("div");
@@ -304,8 +571,10 @@ function beginEditTurn(turnId) {
   cancel.textContent = "取消";
   const submit = document.createElement("button");
   submit.type = "submit";
-  submit.className = "button primary compact";
-  submit.textContent = "发送";
+  submit.className = "button primary icon-button";
+  submit.setAttribute("aria-label", "发送修改");
+  submit.title = "发送修改";
+  submit.append(elements.send.querySelector("svg").cloneNode(true));
   footer.append(cancel, submit);
   form.append(input, footer);
 
@@ -313,11 +582,18 @@ function beginEditTurn(turnId) {
   const actions = message.wrapper.querySelector(".message-actions");
   if (actions) actions.hidden = true;
   message.wrapper.prepend(form);
+  const editor = createMarkdownEditor(input, {
+    initialValue: message.text,
+    minHeight: "96px",
+    onSubmit: () => form.requestSubmit(),
+    onCancel: () => {
+      closeEditTurn();
+      promptEditor.commands.focus();
+    },
+  });
   state.editingTurnId = turnId;
   updateComposerState();
-  resizeEditInput(input);
-  input.focus();
-  input.setSelectionRange(input.value.length, input.value.length);
+  editor.commands.focus("end");
 }
 
 function prepareForkDisplay(turnId, prompt) {
@@ -354,6 +630,7 @@ function renderSession(view) {
   }
   setStatus(view.status);
   updateComposerState();
+  requestAnimationFrame(scrollMessagesToBottom);
 }
 
 function updateAssistant(event) {
@@ -372,19 +649,10 @@ function updateAssistant(event) {
     node.wrapper.classList.add("commentary");
   }
   if (typeof event.delta === "string") {
+    const follow = elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight < 80;
     node.raw += event.delta;
     renderRichText(node.bubble, node.raw);
-    elements.messages.scrollTop = elements.messages.scrollHeight;
-  }
-}
-
-function updatePromptPreview() {
-  const source = elements.prompt.value.trim();
-  elements.promptPreview.hidden = source === "";
-  if (source !== "") {
-    renderRichText(elements.promptPreview, source);
-  } else {
-    elements.promptPreview.replaceChildren();
+    if (follow) elements.messages.scrollTop = elements.messages.scrollHeight;
   }
 }
 
@@ -395,7 +663,7 @@ function handleEvent(event) {
   } else if (event.kind === "assistant_text") {
     updateAssistant(event);
   } else if (event.kind === "reasoning") {
-    if (event.delta) addActivity("推理摘要", event.delta);
+    updateReasoning(event);
   } else if (event.kind === "tool") {
     addActivity("工具", `${event.toolType} · ${event.status}`);
   } else if (event.kind === "terminal") {
@@ -515,15 +783,14 @@ async function createSession() {
 async function sendPrompt(event) {
   event.preventDefault();
   if (state.running) return;
-  const prompt = elements.prompt.value.trim();
+  const prompt = promptEditor.getMarkdown().trim();
   if (!prompt) return;
   state.running = true;
   state.canStop = true;
   updateComposerState();
   addMessage({ id: `local-user-${Date.now()}`, role: "user", text: prompt });
-  elements.prompt.value = "";
-  updatePromptPreview();
-  elements.log.replaceChildren();
+  promptEditor.commands.clearContent(false);
+  clearActivityLog();
   setStatus("in_progress");
   const abortController = new AbortController();
   state.streamAbortController = abortController;
@@ -559,7 +826,7 @@ async function sendPrompt(event) {
     }
     state.running = false;
     updateComposerState();
-    elements.prompt.focus();
+    promptEditor.commands.focus();
   }
 }
 
@@ -568,7 +835,7 @@ async function retryTurn(turnId) {
   state.running = true;
   state.canStop = true;
   updateComposerState();
-  elements.log.replaceChildren();
+  clearActivityLog();
   addActivity("重试", "从该用户消息重新生成");
   const prompt = state.userMessages.get(turnId)?.text;
   if (prompt) prepareForkDisplay(turnId, prompt);
@@ -595,7 +862,7 @@ async function retryTurn(turnId) {
     }
     state.running = false;
     updateComposerState();
-    elements.prompt.focus();
+    promptEditor.commands.focus();
   }
 }
 
@@ -605,7 +872,7 @@ async function editTurn(turnId, prompt) {
   state.canStop = true;
   prepareForkDisplay(turnId, prompt);
   updateComposerState();
-  elements.log.replaceChildren();
+  clearActivityLog();
   addActivity("编辑", "从修改后的用户消息重新生成");
   const abortController = new AbortController();
   state.streamAbortController = abortController;
@@ -635,7 +902,7 @@ async function editTurn(turnId, prompt) {
     }
     state.running = false;
     updateComposerState();
-    elements.prompt.focus();
+    promptEditor.commands.focus();
   }
 }
 
@@ -677,8 +944,8 @@ elements.newSession.addEventListener("click", async () => {
   if (state.running) return;
   try {
     await createSession();
-    elements.log.replaceChildren();
-    elements.prompt.focus();
+    clearActivityLog();
+    promptEditor.commands.focus();
   } catch (error) {
     addActivity("错误", error.message);
   }
@@ -686,18 +953,38 @@ elements.newSession.addEventListener("click", async () => {
 elements.cancelFork.addEventListener("click", async () => {
   state.forkSourceTurnId = null;
   await loadSession(null);
-  elements.prompt.focus();
+  promptEditor.commands.focus();
 });
-elements.sessionSelect.addEventListener("change", async () => {
-  const sessionId = elements.sessionSelect.value;
+elements.sessionList.addEventListener("click", async (event) => {
+  const archiveButton = event.target.closest("button[data-action=archive]");
+  const target = event.target.closest("[data-session-id]");
+  const sessionId = archiveButton?.dataset.sessionId ?? target?.dataset.sessionId;
+  if (archiveButton) {
+    if (!sessionId) return;
+    const shouldArchive = window.confirm(
+      state.running && sessionId === state.sessionId
+        ? "当前会话正在生成，归档后将无法继续当前生成。确定归档吗？"
+        : "确定归档这个会话吗？",
+    );
+    if (!shouldArchive) return;
+    try {
+      await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, { method: "POST" });
+      if (sessionId === state.sessionId) {
+        state.sessionId = null;
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+        await createSession();
+      } else await refreshSessionList();
+    } catch (error) { addActivity("归档", error.message); }
+    return;
+  }
   if (!sessionId || state.running) return;
   state.sessionId = sessionId;
   state.headTurnId = localStorage.getItem(headStorageKey(sessionId));
   localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
-  elements.log.replaceChildren();
+  clearActivityLog();
   try {
     await loadSession();
-    elements.prompt.focus();
+    promptEditor.commands.focus();
   } catch (error) {
     addActivity("错误", error.message);
   }
@@ -709,14 +996,14 @@ elements.messages.addEventListener("click", async (event) => {
     beginEditTurn(button.dataset.turnId);
   } else if (button.dataset.action === "cancel-edit") {
     closeEditTurn();
-    elements.prompt.focus();
+    promptEditor.commands.focus();
   } else if (button.dataset.action === "retry" && button.dataset.turnId) {
     await retryTurn(button.dataset.turnId);
   } else if (button.dataset.action === "fork" && button.dataset.turnId) {
     await loadSession(button.dataset.turnId);
     state.forkSourceTurnId = button.dataset.turnId;
     setStatus(elements.status.textContent);
-    elements.prompt.focus();
+    promptEditor.commands.focus();
   } else if (button.dataset.action === "switch-version" && button.dataset.headTurnId) {
     state.headTurnId = button.dataset.headTurnId;
     await loadSession(state.headTurnId);
@@ -727,38 +1014,14 @@ elements.messages.addEventListener("submit", async (event) => {
   if (!form || state.running) return;
   event.preventDefault();
   const input = form.querySelector(".message-edit-input");
-  const prompt = input?.value.trim();
+  const prompt = input ? markdownEditors.get(input)?.getMarkdown().trim() : "";
   if (!prompt || !form.dataset.turnId) return;
   await editTurn(form.dataset.turnId, prompt);
 });
-elements.messages.addEventListener("input", (event) => {
-  if (event.target.matches(".message-edit-input")) {
-    resizeEditInput(event.target);
-  }
-});
-elements.messages.addEventListener("keydown", (event) => {
-  if (!event.target.matches(".message-edit-input")) return;
-  if (event.key === "Escape") {
-    event.preventDefault();
-    closeEditTurn();
-    elements.prompt.focus();
-  } else if (event.key === "Enter" && !event.shiftKey) {
-    event.preventDefault();
-    event.target.form?.requestSubmit();
-  }
-});
-elements.prompt.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
-    event.preventDefault();
-    elements.composer.requestSubmit();
-  }
-});
-elements.prompt.addEventListener("input", updatePromptPreview);
-
 async function boot() {
   try {
-    const health = await requestJson("/api/health");
-    elements.badge.textContent = health.apiKeyConfigured ? health.model : "API key missing";
+    await requestJson("/api/health");
+    // The model/config status is intentionally not displayed in the chat shell.
     const savedSessionId = localStorage.getItem(SESSION_STORAGE_KEY);
     if (savedSessionId) {
       state.sessionId = savedSessionId;
@@ -771,9 +1034,8 @@ async function boot() {
     } else {
       await createSession();
     }
-    elements.prompt.focus();
+    promptEditor.commands.focus();
   } catch (error) {
-    elements.badge.textContent = "offline";
     addActivity("错误", error.message);
   }
 }

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 
 import type { RunPolicy } from "@mas-chat/config";
-import type { JsonObject, NormalizedEvent } from "@mas-chat/protocol";
+import type { JsonObject, NormalizedEvent, SessionMetadata } from "@mas-chat/protocol";
 import { resolveTurns, type RunController } from "@mas-chat/runtime";
 import {
   SessionStore,
@@ -79,6 +79,14 @@ export class SessionService {
       ...snapshot,
       locallyActive: this.#registry.has(snapshot.metadata.sessionId),
     }));
+  }
+
+  async archiveSession(sessionId: string): Promise<SessionMetadata> {
+    const snapshot = await this.#store.inspectSession(sessionId);
+    if (this.#registry.has(sessionId) || snapshot.metadata.activeTurnId !== undefined) {
+      throw new SessionCommandConflictError(`Session ${sessionId} is still running and cannot be archived`);
+    }
+    return this.#store.archiveSession(sessionId);
   }
 
   async reconcileInterruptedSessions(): Promise<void> {

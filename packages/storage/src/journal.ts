@@ -225,6 +225,7 @@ export interface RecordResponseEventResult {
 }
 
 export interface StoredSessionSnapshot {
+  archived: boolean;
   metadata: SessionMetadata;
   records: JournalRecord[];
 }
@@ -237,7 +238,11 @@ export class SessionStore {
   constructor(rootDirectory: string) {
     this.rootDirectory = path.resolve(rootDirectory);
     this.sessionsDirectory = path.join(this.rootDirectory, "sessions");
+    this.archivedDirectory = path.join(this.rootDirectory, "archive");
   }
+
+  readonly archivedDirectory: string;
+  readonly #archivedIds = new Set<string>();
 
   async createSession(sessionId: string, now = new Date()): Promise<SessionMetadata> {
     assertSafeId(sessionId);
@@ -264,6 +269,23 @@ export class SessionStore {
     await appendAndSync(this.journalPath(sessionId), record);
     await writeJsonAtomically(this.metadataPath(sessionId), metadata);
     return metadata;
+  }
+
+  async archiveSession(sessionId: string): Promise<SessionMetadata> {
+    assertSafeId(sessionId);
+    return this.withLock(sessionId, async () => {
+      const current = await this.loadMetadataUnlocked(sessionId);
+      if (this.#archivedIds.has(sessionId)) return current;
+      if (current.activeTurnId !== undefined) {
+        throw new SessionStateError(`Session ${sessionId} is still running and cannot be archived`);
+      }
+      const source = this.sessionDirectory(sessionId);
+      const target = this.archivedSessionDirectory(sessionId);
+      await mkdir(this.archivedDirectory, { recursive: true });
+      await rename(source, target);
+      this.#archivedIds.add(sessionId);
+      return current;
+    });
   }
 
   async beginTurn(
@@ -557,6 +579,7 @@ export class SessionStore {
     return this.withLock(sessionId, async () => {
       const records = await this.readJournalUnlocked(sessionId);
       return {
+        archived: this.#archivedIds.has(sessionId),
         metadata: rebuildMetadata(sessionId, records),
         records,
       };
@@ -573,12 +596,17 @@ export class SessionStore {
 
   async listSessionSnapshots(): Promise<StoredSessionSnapshot[]> {
     await mkdir(this.sessionsDirectory, { recursive: true });
-    const entries = await readdir(this.sessionsDirectory, { withFileTypes: true });
+    await mkdir(this.archivedDirectory, { recursive: true });
+    const entries = [
+      ...(await readdir(this.sessionsDirectory, { withFileTypes: true })).map((entry) => ({ entry, archived: false })),
+      ...(await readdir(this.archivedDirectory, { withFileTypes: true })).map((entry) => ({ entry, archived: true })),
+    ];
     const sessions: StoredSessionSnapshot[] = [];
-    for (const entry of entries) {
+    for (const { entry, archived } of entries) {
       if (!entry.isDirectory() || !SAFE_ID.test(entry.name)) {
         continue;
       }
+      if (archived) this.#archivedIds.add(entry.name);
       sessions.push(await this.inspectSession(entry.name));
     }
     return sessions.sort((left, right) =>
@@ -588,7 +616,12 @@ export class SessionStore {
 
   sessionDirectory(sessionId: string): string {
     assertSafeId(sessionId);
-    return path.join(this.sessionsDirectory, sessionId);
+    return path.join(this.#archivedIds.has(sessionId) ? this.archivedDirectory : this.sessionsDirectory, sessionId);
+  }
+
+  archivedSessionDirectory(sessionId: string): string {
+    assertSafeId(sessionId);
+    return path.join(this.archivedDirectory, sessionId);
   }
 
   journalPath(sessionId: string): string {
@@ -600,6 +633,7 @@ export class SessionStore {
   }
 
   async loadMetadataUnlocked(sessionId: string): Promise<SessionMetadata> {
+    await this.locateSession(sessionId);
     let persisted: SessionMetadata | undefined;
     try {
       persisted = JSON.parse(
@@ -620,8 +654,25 @@ export class SessionStore {
   }
 
   async readJournalUnlocked(sessionId: string): Promise<JournalRecord[]> {
+    await this.locateSession(sessionId);
     const text = await readFile(this.journalPath(sessionId), "utf8");
     return parseJournal(text);
+  }
+
+  private async locateSession(sessionId: string): Promise<void> {
+    if (this.#archivedIds.has(sessionId)) return;
+    try {
+      await readFile(path.join(this.sessionsDirectory, sessionId, "events.jsonl"));
+      return;
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
+    try {
+      await readFile(path.join(this.archivedDirectory, sessionId, "events.jsonl"));
+      this.#archivedIds.add(sessionId);
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
   }
 
   async withLock<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {

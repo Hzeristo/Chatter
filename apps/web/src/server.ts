@@ -37,6 +37,7 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
 
 type SessionListItem = {
+  archived: boolean;
   sessionId: string;
   status: string;
   createdAt: string;
@@ -154,6 +155,7 @@ async function main(): Promise<void> {
     );
     const preview = firstUserMessage?.text.trim().replace(/\s+/g, " ");
     return {
+      archived: snapshot.archived,
       sessionId: metadata.sessionId,
       status: view.status,
       createdAt: metadata.createdAt,
@@ -201,7 +203,18 @@ async function main(): Promise<void> {
       if (request.method === "GET" && pathname === "/api/sessions") {
         const snapshots = await service.listSessions();
         const sessions = await Promise.all(snapshots.map(sessionListItem));
-        sendJson(response, 200, { sessions });
+        sendJson(response, 200, {
+          sessions: sessions.filter((session) => !session.archived),
+          archivedSessions: sessions.filter((session) => session.archived),
+        });
+        return;
+      }
+
+      const archiveMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/archive$/);
+      if (request.method === "POST" && archiveMatch?.[1] !== undefined) {
+        const sessionId = decodeURIComponent(archiveMatch[1]);
+        await service.archiveSession(sessionId);
+        sendJson(response, 200, { sessionId, archived: true });
         return;
       }
 

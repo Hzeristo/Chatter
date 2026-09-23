@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -40,6 +40,19 @@ afterEach(async () => {
 });
 
 describe("session journal", () => {
+  it("moves an idle session into the archive directory", async () => {
+    const store = await temporaryStore();
+    await store.createSession("to-archive");
+
+    await store.archiveSession("to-archive");
+
+    await expect(stat(path.join(store.sessionsDirectory, "to-archive"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(store.archivedSessionDirectory("to-archive"))).resolves.toBeTruthy();
+    const listed = await store.listSessionSnapshots();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({ archived: true, metadata: { sessionId: "to-archive" } });
+  });
+
   it("lists sessions in most recently updated order", async () => {
     const store = await temporaryStore();
     await store.createSession("older", new Date("2026-09-20T00:00:00Z"));

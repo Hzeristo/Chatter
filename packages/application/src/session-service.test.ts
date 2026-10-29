@@ -42,6 +42,7 @@ function waitForAbort(signal: AbortSignal): Promise<never> {
 
 class CompletingTransport implements ResponsesTransport {
   count = 0;
+  readonly requests: ResponseCreateParamsStreaming[] = [];
   cancelError: Error | undefined;
   readonly resumeError: Error | undefined;
 
@@ -50,8 +51,9 @@ class CompletingTransport implements ResponsesTransport {
   }
 
   async create(
-    _request: ResponseCreateParamsStreaming,
+    request: ResponseCreateParamsStreaming,
   ): Promise<AsyncIterable<JsonObject>> {
+    this.requests.push(structuredClone(request));
     this.count += 1;
     const responseId = `response-${this.count}`;
     return eventStream([
@@ -171,6 +173,45 @@ afterEach(async () => {
 });
 
 describe("SessionService", () => {
+  it.each(["retry", "edit"] as const)(
+    "keeps repeated root %s requests free of sibling answers",
+    async (kind) => {
+      const store = await temporaryStore();
+      await store.createSession("session-1");
+      const transport = new CompletingTransport();
+      const turnIds = ["root", "replacement", "retry-again", "next"];
+      const controller = new RunController(store, transport, () => turnIds.shift()!);
+      const service = new SessionService(store, () => controller, {});
+      const prompt = kind === "edit" ? "Edited root" : "Root";
+
+      await consume(await service.continueSession("session-1", "Root"));
+      await consume(kind === "edit"
+        ? await service.editTurn("session-1", "root", prompt)
+        : await service.retryTurn("session-1", "root"));
+      await consume(await service.retryTurn("session-1", "replacement"));
+
+      expect(transport.requests.map((request) => request.input)).toEqual([
+        [{ role: "user", content: "Root" }],
+        [{ role: "user", content: prompt }],
+        [{ role: "user", content: prompt }],
+      ]);
+
+      const records = await store.readJournal("session-1");
+      const retriedInput = records.filter((record) => record.kind === "turn.input")
+        .find((record) => record.turnId === "retry-again")!;
+      const retriedOutput = records.filter((record) => record.kind === "turn.output")
+        .find((record) => record.turnId === "retry-again")!;
+      expect(retriedInput.lineage?.parentTurnId).toBeNull();
+
+      await consume(await service.continueSession("session-1", "Follow-up"));
+      expect(transport.requests[3]?.input).toEqual([
+        ...retriedInput.items,
+        ...retriedOutput.items,
+        { role: "user", content: "Follow-up" },
+      ]);
+    },
+  );
+
   it("keeps inspect and list pure, then reconciles interrupted work explicitly", async () => {
     const store = await temporaryStore();
     await store.createSession("session-1");

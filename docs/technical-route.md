@@ -128,6 +128,8 @@ JSONL 是 append-only write-ahead journal，保留四类记录：新 turn 的原
 
 日志不追求人类可读 transcript。跨轮“完整”的标准是：按原顺序保留用户 input 与每个 `response.output` item，包括 encrypted reasoning、assistant `phase`、hosted-tool call、来源和 annotations，能够无损构造下一轮 Responses `input`。API key、Authorization header 和 SDK 请求头不得进入 journal。
 
+显式 `parentTurnId: null` 表示根分支，首轮 retry/edit 必须保持为同一消息的 sibling；只有缺少整个 lineage 的旧日志才能推断线性父节点。该规则同时约束前端版本投影、再次重试和后续请求的 history，已有正确记录无需重写。
+
 ## 6. 初始请求策略
 
 默认请求语义如下；model、reasoning effort/summary、text verbosity、两个 hosted-tool 开关和 background fallback 策略可由 `.env` 全局配置。`store:false` 与 `stream:true` 不可覆盖：

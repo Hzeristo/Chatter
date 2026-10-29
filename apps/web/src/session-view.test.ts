@@ -166,6 +166,49 @@ function records(includeRetry: boolean): JournalRecord[] {
 }
 
 describe("web session projection", () => {
+  it.each(["retry", "edit"] as const)(
+    "shows a completed root %s as a version of the same message",
+    (kind) => {
+      const rootRecords = records(true).slice(0, 3);
+      rootRecords.push(
+        {
+          ...base,
+          kind: "turn.input",
+          turnId: "replacement",
+          lineage: { parentTurnId: null, fork: { kind, sourceTurnId: "root" } },
+          items: [{ role: "user", content: kind === "edit" ? "Edited root" : "Root" }],
+          configuration,
+        },
+        {
+          ...base,
+          kind: "turn.output",
+          turnId: "replacement",
+          responseId: "resp-replacement",
+          status: "completed",
+          items: [{ type: "message", role: "assistant", content: "Replacement answer" }],
+        },
+      );
+
+      const latest = createSessionView(
+        "session-1", metadata("completed"), rootRecords, undefined, false,
+      );
+      expect(latest.messages.map((message) => message.text)).toEqual([
+        kind === "edit" ? "Edited root" : "Root",
+        "Replacement answer",
+      ]);
+      expect(latest.messages[0]?.versions?.map((version) => version.turnId))
+        .toEqual(["root", "replacement"]);
+      expect(latest.messages[0]?.versionIndex).toBe(1);
+
+      const original = createSessionView(
+        "session-1", metadata("completed"), rootRecords, "root", false,
+      );
+      expect(original.messages.map((message) => message.text)).toEqual(["Root", "Root answer"]);
+      expect(original.messages[0]?.versions).toHaveLength(2);
+      expect(original.messages[0]?.versionIndex).toBe(0);
+    },
+  );
+
   it("rebuilds partial text for an attachable unfinished turn", () => {
     const view = createSessionView(
       "session-1",

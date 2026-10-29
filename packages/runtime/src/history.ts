@@ -38,7 +38,10 @@ export function resolveTurns(records: JournalRecord[]): ResolvedTurn[] {
         if (byId.has(record.turnId)) {
           throw new ReplayHistoryError(`Turn ${record.turnId} has duplicate input`);
         }
-        const parentTurnId = record.lineage?.parentTurnId ?? latestCompletedTurnId;
+        const parentTurnId =
+          record.lineage === undefined
+            ? latestCompletedTurnId
+            : record.lineage.parentTurnId;
         if (parentTurnId !== null && !byId.has(parentTurnId)) {
           throw new ReplayHistoryError(
             `Turn ${record.turnId} references unknown parent ${parentTurnId}`,

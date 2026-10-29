@@ -7,7 +7,12 @@ import {
 } from "@mas-chat/protocol";
 
 import { ReplayHistoryError } from "./errors.js";
-import { buildReplayHistory, latestCompletedTurnId } from "./history.js";
+import {
+  buildReplayHistory,
+  buildTurnPath,
+  latestCompletedTurnId,
+  resolveTurns,
+} from "./history.js";
 
 const base = {
   schemaVersion: JOURNAL_SCHEMA_VERSION,
@@ -16,6 +21,92 @@ const base = {
 } as const;
 
 describe("stateless history replay", () => {
+  it.each(["retry", "edit"] as const)(
+    "keeps a completed root %s independent of earlier completed turns",
+    (kind) => {
+      const configuration: RunConfigurationSnapshot = {
+        model: "test-model",
+        background: true,
+        stream: true,
+        store: false,
+        reasoning: {},
+        text: {},
+        tools: [],
+        include: [],
+      };
+      const records: JournalRecord[] = [{ ...base, kind: "session.created" }];
+      for (const turnId of ["root", "old-followup", "replacement"]) {
+        records.push(
+          {
+            ...base,
+            kind: "turn.input",
+            turnId,
+            lineage: {
+              parentTurnId: turnId === "old-followup" ? "root" : null,
+              ...(turnId === "replacement"
+                ? { fork: { kind, sourceTurnId: "root" } }
+                : {}),
+            },
+            items: [{ role: "user", content: `${turnId} question` }],
+            configuration,
+          },
+          {
+            ...base,
+            kind: "turn.output",
+            turnId,
+            responseId: `resp-${turnId}`,
+            status: "completed",
+            items: [{ type: "message", role: "assistant", content: `${turnId} answer` }],
+          },
+        );
+      }
+
+      expect(resolveTurns(records).at(-1)?.parentTurnId).toBeNull();
+      expect(buildTurnPath(records, "replacement").map((turn) => turn.input.turnId))
+        .toEqual(["replacement"]);
+      expect(buildReplayHistory(records, "replacement")).toEqual([
+        { role: "user", content: "replacement question" },
+        { type: "message", role: "assistant", content: "replacement answer" },
+      ]);
+    },
+  );
+
+  it("keeps linear parenting for legacy turns without lineage", () => {
+    const configuration: RunConfigurationSnapshot = {
+      model: "test-model",
+      background: true,
+      stream: true,
+      store: false,
+      reasoning: {},
+      text: {},
+      tools: [],
+      include: [],
+    };
+    const records: JournalRecord[] = [{ ...base, kind: "session.created" }];
+    for (const turnId of ["first", "second"]) {
+      records.push(
+        {
+          ...base,
+          kind: "turn.input",
+          turnId,
+          items: [{ role: "user", content: `${turnId} question` }],
+          configuration,
+        },
+        {
+          ...base,
+          kind: "turn.output",
+          turnId,
+          responseId: `resp-${turnId}`,
+          status: "completed",
+          items: [{ type: "message", role: "assistant", content: `${turnId} answer` }],
+        },
+      );
+    }
+
+    expect(resolveTurns(records).map((turn) => turn.parentTurnId)).toEqual([null, "first"]);
+    expect(buildReplayHistory(records)).toHaveLength(4);
+  });
+
   it("replays every native output item in order without flattening", () => {
     const reasoning = {
       id: "rs_1",

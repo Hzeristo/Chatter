@@ -2,6 +2,7 @@ import type {
   JournalRecord,
   OpenAINativeItem,
   RunStatus,
+  SessionForkMetadata,
   SessionMetadata,
 } from "@mas-chat/protocol";
 import {
@@ -36,6 +37,7 @@ export interface SessionMessageView {
 
 export interface SessionView {
   canContinue: boolean;
+  fork?: SessionForkMetadata;
   headTurnId: string | null;
   lastSequenceNumber: number;
   messages: SessionMessageView[];
@@ -287,6 +289,7 @@ export function createSessionView(
       (metadata.activeTurnId === undefined &&
         head?.status !== "queued" &&
         head?.status !== "in_progress"),
+    ...(metadata.fork === undefined ? {} : { fork: metadata.fork }),
     ...(metadata.responseId === undefined
       ? {}
       : { responseId: metadata.responseId }),

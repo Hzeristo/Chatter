@@ -19,6 +19,7 @@ import {
   RunController,
 } from "@mas-chat/runtime";
 import { SessionStore } from "@mas-chat/storage";
+import type { SessionForkMetadata } from "@mas-chat/protocol";
 
 import {
   readBody,
@@ -38,6 +39,7 @@ const DEFAULT_PORT = 8787;
 
 type SessionListItem = {
   archived: boolean;
+  fork?: SessionForkMetadata;
   sessionId: string;
   status: string;
   createdAt: string;
@@ -156,6 +158,7 @@ async function main(): Promise<void> {
     const preview = firstUserMessage?.text.trim().replace(/\s+/g, " ");
     return {
       archived: snapshot.archived,
+      ...(metadata.fork === undefined ? {} : { fork: metadata.fork }),
       sessionId: metadata.sessionId,
       status: view.status,
       createdAt: metadata.createdAt,
@@ -264,10 +267,14 @@ async function main(): Promise<void> {
         const sessionId = decodeURIComponent(forkMatch[1]);
         const sourceTurnId = decodeURIComponent(forkMatch[2] ?? "");
         const forked = parseTurnRequest(await readBody(request));
-        await streamEvents(
-          response,
-          await service.forkTurn(sessionId, sourceTurnId, forked.prompt),
+        const result = await service.forkTurn(
+          sessionId,
+          sourceTurnId,
+          forked.prompt,
         );
+        await streamEvents(response, result.events, {
+          "X-MAS-Chat-Session-Id": result.sessionId,
+        });
         return;
       }
 

@@ -124,7 +124,7 @@ JSONL 是 append-only write-ahead journal，保留四类记录：新 turn 的原
 
 命令路径可以修复落后的 metadata cache；inspect/list 路径直接从 journal 派生快照且不写盘。orphan 判定不得隐藏在读取路径中。
 
-每个新 `turn.input` 记录显式 lineage：`parentTurnId` 指向所选对话路径的上一轮，retry/edit 以 fork metadata 指向来源 turn。旧 journal 不重写；缺少 lineage 的旧 turn 按 journal 顺序连接到当时最近成功完成的 turn。一个 session 因此可以形成 turn tree，但下一轮请求只重放从根到所选父节点的单一路径。失败、截断、incomplete 和 cancelled turn 可保留并展示；继续输入时保留这些 turn 的 user input，但其 partial/terminal assistant output 绝不进入新请求的 replay history。
+每个新 `turn.input` 记录显式 lineage：`parentTurnId` 指向所选对话路径的上一轮，retry/edit 以 fork metadata 指向来源 turn。缺少 lineage 的旧 turn 按 journal 顺序连接到当时最近成功完成的 turn。retry/edit 可以让一个 session 形成 turn tree，但下一轮请求只重放从根到所选父节点的单一路径。显式 fork 不再写入原 session 的 turn tree：storage 复制截至所选 turn 的完整 journal 路径，创建唯一的新 session，并在 `session.created.fork` 中记录来源 session/turn。失败、截断、incomplete 和 cancelled turn 可保留并展示；继续输入时保留这些 turn 的 user input，但其 partial/terminal assistant output 绝不进入新请求的 replay history。
 
 日志不追求人类可读 transcript。跨轮“完整”的标准是：按原顺序保留用户 input 与每个 `response.output` item，包括 encrypted reasoning、assistant `phase`、hosted-tool call、来源和 annotations，能够无损构造下一轮 Responses `input`。API key、Authorization header 和 SDK 请求头不得进入 journal。
 
@@ -238,7 +238,7 @@ Application service 维护进程内 run registry，用来区分“页面连接�
 - 已增加一个只绑定本地地址的原生 Web 壳，作为 protocol consumer；
 - UI 只能消费 protocol，不得重新实现 Responses 状态机；
 - 已支持在 user message 下重试/重新生成或原位编辑后重试，并在同一 session 内切换 sibling turn 版本；
-- 已支持从完成的历史 turn 显式 fork，并记录 `fork.kind: "explicit"`；
+- 已支持从完成的历史 turn 显式 fork；每个 fork 具有独立 session ID，并记录 session 级来源；
 - 视觉、Markdown、会话列表、设置编辑和多用户部署暂不预设，避免在真实交互反馈前过度设计。
 
 ## 10. 验收标准

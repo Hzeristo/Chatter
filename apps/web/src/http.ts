@@ -89,13 +89,14 @@ function writeSse(response: http.ServerResponse, value: unknown): void {
 export async function streamEvents(
   response: http.ServerResponse,
   events: AsyncIterable<NormalizedEvent>,
+  headers: Record<string, string> = {},
 ): Promise<void> {
   let connected = true;
   let lastSequenceNumber = 0;
   response.on("close", () => {
     connected = false;
   });
-  response.writeHead(200, streamHeaders());
+  response.writeHead(200, { ...streamHeaders(), ...headers });
   response.flushHeaders();
 
   try {

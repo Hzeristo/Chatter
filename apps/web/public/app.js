@@ -764,7 +764,17 @@ async function loadSession(headTurnId = state.headTurnId, options = {}) {
     state.pollTimer = null;
   }
   const query = headTurnId ? `?head=${encodeURIComponent(headTurnId)}` : "";
-  const view = await requestJson(`/api/sessions/${state.sessionId}${query}`);
+  let view;
+  try {
+    view = await requestJson(`/api/sessions/${state.sessionId}${query}`);
+  } catch (error) {
+    if (!headTurnId || !/unknown visible turn/i.test(error.message)) {
+      throw error;
+    }
+    state.headTurnId = null;
+    localStorage.removeItem(headStorageKey(state.sessionId));
+    view = await requestJson(`/api/sessions/${state.sessionId}`);
+  }
   renderSession(view);
   if (options.recover !== false) {
     await attachIfNeeded(view);
@@ -798,7 +808,7 @@ async function sendPrompt(event) {
     const endpoint = state.forkSourceTurnId
       ? `/api/sessions/${state.sessionId}/turns/${encodeURIComponent(state.forkSourceTurnId)}/fork`
       : `/api/sessions/${state.sessionId}/turn`;
-    await consumeSse(await fetch(endpoint, {
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: abortController.signal,
@@ -807,7 +817,17 @@ async function sendPrompt(event) {
           ? { prompt }
           : { prompt, parentTurnId: state.headTurnId },
       ),
-    }));
+    });
+    if (state.forkSourceTurnId && response.ok) {
+      const forkedSessionId = response.headers.get("X-MAS-Chat-Session-Id");
+      if (!forkedSessionId) {
+        throw new Error("Fork response did not provide a session ID");
+      }
+      state.sessionId = forkedSessionId;
+      state.headTurnId = null;
+      localStorage.setItem(SESSION_STORAGE_KEY, forkedSessionId);
+    }
+    await consumeSse(response);
     state.forkSourceTurnId = null;
     state.headTurnId = null;
     await loadSession(null, { recover: false });

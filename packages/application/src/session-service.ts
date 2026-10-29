@@ -3,10 +3,20 @@ import { randomUUID } from "node:crypto";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 
 import type { RunPolicy } from "@mas-chat/config";
-import type { JsonObject, NormalizedEvent, SessionMetadata } from "@mas-chat/protocol";
-import { resolveTurns, type RunController } from "@mas-chat/runtime";
+import type {
+  JournalRecord,
+  JsonObject,
+  NormalizedEvent,
+  SessionMetadata,
+} from "@mas-chat/protocol";
+import {
+  buildTurnPath,
+  resolveTurns,
+  type RunController,
+} from "@mas-chat/runtime";
 import {
   SessionStore,
+  type HistoricalJournalRecord,
   type StoredSessionSnapshot,
 } from "@mas-chat/storage";
 
@@ -19,6 +29,11 @@ export interface SessionSnapshot extends StoredSessionSnapshot {
 
 export interface ContinueOptions {
   parentTurnId?: string | null;
+}
+
+export interface ForkedSessionRun {
+  events: AsyncIterable<NormalizedEvent>;
+  sessionId: string;
 }
 
 function promptInput(prompt: string): ResponseInputItem[] {
@@ -162,15 +177,17 @@ export class SessionService {
   }
 
   async forkTurn(
-    sessionId: string,
+    sourceSessionId: string,
     sourceTurnId: string,
     prompt: string,
-  ): Promise<AsyncIterable<NormalizedEvent>> {
-    return this.#ownedStream(sessionId, async (signal) => {
-      const snapshot = await this.#store.inspectSession(sessionId);
+  ): Promise<ForkedSessionRun> {
+    const sourceHandle = this.#registry.claim(sourceSessionId);
+    let sessionId: string;
+    try {
+      const snapshot = await this.#store.inspectSession(sourceSessionId);
       if (snapshot.metadata.activeTurnId !== undefined) {
         throw new SessionCommandConflictError(
-          `Session ${sessionId} has an active turn and cannot fork`,
+          `Session ${sourceSessionId} has an active turn and cannot fork`,
         );
       }
       const source = resolveTurns(snapshot.records).find(
@@ -179,14 +196,43 @@ export class SessionService {
       if (source === undefined) {
         throw new SessionCommandConflictError(`Unknown turn ${sourceTurnId}`);
       }
-      return this.#controller().start(promptInput(prompt), {
+      if (source.status !== "completed") {
+        throw new SessionCommandConflictError(
+          `Turn ${sourceTurnId} is not completed and cannot fork`,
+        );
+      }
+
+      const pathTurnIds = new Set(
+        buildTurnPath(snapshot.records, sourceTurnId).map(
+          (turn) => turn.input.turnId,
+        ),
+      );
+      const history = snapshot.records.filter(
+        (record): record is HistoricalJournalRecord =>
+          record.kind !== "session.created" &&
+          pathTurnIds.has(this.#recordTurnId(record)),
+      );
+      sessionId = this.#ids();
+      await this.#store.createSessionFromHistory(sessionId, history, {
+        sourceSessionId,
+        sourceTurnId,
+      });
+    } finally {
+      sourceHandle.release();
+    }
+    const events = await this.#ownedStream(sessionId, (signal) =>
+      this.#controller().start(promptInput(prompt), {
         sessionId,
         ...this.#runPolicy,
         signal,
         parentTurnId: sourceTurnId,
-        fork: { kind: "explicit", sourceTurnId },
-      });
-    });
+      }),
+    );
+    return { sessionId, events };
+  }
+
+  #recordTurnId(record: Exclude<JournalRecord, { kind: "session.created" }>): string {
+    return record.turnId;
   }
 
   async attach(sessionId: string): Promise<AsyncIterable<NormalizedEvent>> {

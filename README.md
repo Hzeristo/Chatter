@@ -70,7 +70,7 @@ pnpm web
 # 可用 MAS_CHAT_WEB_HOST / MAS_CHAT_WEB_PORT 覆盖监听地址和端口
 ```
 
-当前 Web API 覆盖建会话、列出及读取脱敏会话投影、发送 turn、attach、cancel、retry、edit 和显式 fork。消息与输入预览支持 Markdown 和 inline LaTeX；重新生成、原位编辑和从历史 turn 分支都会在同一 session 内形成明确的 turn lineage，失败或截断回答不会进入新分支的 replay history。远端 API 的 4xx/5xx、streaming error、`type: "error"` 事件以及没有 terminal event 就结束的流都会将当前 turn 终结为 failed，不会继续伪装成可 attach 的进行中响应；Web composer 提供停止生成入口。设置页、主题系统与更复杂的视觉设计仍等实际使用反馈后再决定。
+当前 Web API 覆盖建会话、列出及读取脱敏会话投影、发送 turn、attach、cancel、retry、edit 和显式 fork。消息与输入预览支持 Markdown 和 inline LaTeX；重新生成与原位编辑在同一 session 内形成 sibling turn，显式 fork 则复制所选祖先路径并创建具有唯一 ID 的独立 session。失败或截断回答不会进入新分支的 replay history。远端 API 的 4xx/5xx、streaming error、`type: "error"` 事件以及没有 terminal event 就结束的流都会将当前 turn 终结为 failed，不会继续伪装成可 attach 的进行中响应；Web composer 提供停止生成入口。设置页、主题系统与更复杂的视觉设计仍等实际使用反馈后再决定。
 
 CLI、Web 和测试入口对同一 data directory 使用进程级单写者租约。Web 在取得租约后、开始监听前统一处理上一实例遗留的不可恢复 turn；读取和列出 session 只从 journal 投影，不改变 journal 或 metadata。因而 Web 运行期间不能再用 CLI 写入同一 data directory。
 

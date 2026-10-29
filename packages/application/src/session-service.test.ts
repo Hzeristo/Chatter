@@ -155,13 +155,20 @@ function createService(
   store: SessionStore,
   turnIds: string[],
   resumeError?: Error,
+  sessionIds = ["fork-session"],
 ): SessionService {
   const controller = new RunController(
     store,
     new CompletingTransport(resumeError),
     () => turnIds.shift()!,
   );
-  return new SessionService(store, () => controller, {});
+  return new SessionService(
+    store,
+    () => controller,
+    {},
+    undefined,
+    () => sessionIds.shift()!,
+  );
 }
 
 afterEach(async () => {
@@ -399,7 +406,7 @@ describe("SessionService", () => {
     expect((await store.loadMetadata("session-1")).activeTurnId).toBeUndefined();
   });
 
-  it("records retry, edit, and explicit fork through one branch service", async () => {
+  it("keeps retry and edit in place but creates a new session for explicit fork", async () => {
     const store = await temporaryStore();
     await store.createSession("session-1");
     const service = createService(store, ["root", "retry", "edit", "fork"]);
@@ -407,7 +414,13 @@ describe("SessionService", () => {
     await consume(await service.continueSession("session-1", "Root"));
     await consume(await service.retryTurn("session-1", "root"));
     await consume(await service.editTurn("session-1", "root", "Edited"));
-    await consume(await service.forkTurn("session-1", "root", "Continue here"));
+    const forked = await service.forkTurn(
+      "session-1",
+      "root",
+      "Continue here",
+    );
+    expect(forked.sessionId).toBe("fork-session");
+    await consume(forked.events);
 
     const inputs = (await store.readJournal("session-1")).filter(
       (record) => record.kind === "turn.input",
@@ -416,10 +429,20 @@ describe("SessionService", () => {
       { parentTurnId: null },
       { parentTurnId: null, fork: { kind: "retry", sourceTurnId: "root" } },
       { parentTurnId: null, fork: { kind: "edit", sourceTurnId: "root" } },
-      {
-        parentTurnId: "root",
-        fork: { kind: "explicit", sourceTurnId: "root" },
-      },
+    ]);
+
+    const forkSnapshot = await store.inspectSession("fork-session");
+    expect(forkSnapshot.metadata.fork).toEqual({
+      sourceSessionId: "session-1",
+      sourceTurnId: "root",
+    });
+    const forkInputs = forkSnapshot.records.filter(
+      (record) => record.kind === "turn.input",
+    );
+    expect(forkInputs.map((input) => input.turnId)).toEqual(["root", "fork"]);
+    expect(forkInputs.map((input) => input.lineage)).toEqual([
+      { parentTurnId: null },
+      { parentTurnId: "root" },
     ]);
   });
 

@@ -50,12 +50,17 @@ interface JournalRecordBase {
 }
 
 export interface SessionCreatedRecord extends JournalRecordBase {
+  fork?: SessionForkMetadata;
   kind: "session.created";
+}
+
+export interface SessionForkMetadata extends JsonObject {
+  sourceSessionId: string;
+  sourceTurnId: string;
 }
 
 export type TurnForkKind =
   | "edit"
-  | "explicit"
   | "retry"
   | "transport_fallback";
 
@@ -120,6 +125,7 @@ export type JournalRecord =
 export interface SessionMetadata {
   activeTurnId?: string;
   createdAt: string;
+  fork?: SessionForkMetadata;
   lastSequenceNumber: number;
   responseId?: string;
   schemaVersion: typeof JOURNAL_SCHEMA_VERSION;

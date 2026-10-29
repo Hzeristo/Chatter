@@ -16,6 +16,7 @@ import {
   type ResponseEventRecord,
   type RunConfigurationSnapshot,
   type RunStatus,
+  type SessionForkMetadata,
   type SessionMetadata,
   type TerminalStatus,
   type TurnLineage,
@@ -148,6 +149,7 @@ function rebuildMetadata(
     lastSequenceNumber: -1,
     createdAt,
     updatedAt: createdAt,
+    ...(created?.fork === undefined ? {} : { fork: created.fork }),
   };
 
   for (const record of records) {
@@ -229,6 +231,11 @@ export interface StoredSessionSnapshot {
   records: JournalRecord[];
 }
 
+export type HistoricalJournalRecord = Exclude<
+  JournalRecord,
+  { kind: "session.created" }
+>;
+
 export class SessionStore {
   readonly rootDirectory: string;
   readonly sessionsDirectory: string;
@@ -266,6 +273,54 @@ export class SessionStore {
     };
 
     await appendAndSync(this.journalPath(sessionId), record);
+    await writeJsonAtomically(this.metadataPath(sessionId), metadata);
+    return metadata;
+  }
+
+  async createSessionFromHistory(
+    sessionId: string,
+    history: HistoricalJournalRecord[],
+    fork: SessionForkMetadata,
+    now = new Date(),
+  ): Promise<SessionMetadata> {
+    assertSafeId(sessionId);
+    assertSafeId(fork.sourceSessionId);
+    assertSafeId(fork.sourceTurnId);
+    const at = now.toISOString();
+    const records: JournalRecord[] = [
+      {
+        schemaVersion: JOURNAL_SCHEMA_VERSION,
+        kind: "session.created",
+        sessionId,
+        at,
+        fork,
+      },
+      ...history.map((record) => ({ ...record, sessionId })),
+    ];
+    const rebuilt = rebuildMetadata(sessionId, records);
+    const metadata: SessionMetadata = {
+      ...rebuilt,
+      createdAt: at,
+      updatedAt:
+        rebuilt.updatedAt.localeCompare(at) < 0 ? at : rebuilt.updatedAt,
+    };
+    if (metadata.activeTurnId !== undefined) {
+      throw new SessionStateError("Fork history must not contain an active turn");
+    }
+
+    const directory = this.sessionDirectory(sessionId);
+    await mkdir(this.sessionsDirectory, { recursive: true });
+    await mkdir(directory);
+    const journal = await open(this.journalPath(sessionId), "wx");
+    try {
+      await journal.writeFile(
+        records.map((record) => JSON.stringify(record)).join("\n") + "\n",
+        "utf8",
+      );
+      await journal.sync();
+    } finally {
+      await journal.close();
+    }
     await writeJsonAtomically(this.metadataPath(sessionId), metadata);
     return metadata;
   }

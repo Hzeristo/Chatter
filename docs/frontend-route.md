@@ -17,7 +17,7 @@
 - 桌面端采用左侧可滚动历史会话栏，主区承载当前聊天；运行状态收纳在左栏底部，不占用主聊天记录和 composer 的垂直空间；窄屏自动切换为单栏。
 - 已支持从本地 session 列表选择并接续既有会话；列表只返回状态、时间、首条用户消息摘要和消息数量，不返回原始 journal。
 - user message 下提供重试/重新生成和原位编辑后重试；新结果作为同一 session 中的 sibling turn 保存，版本按钮切换整条 branch path；
-- 完成的历史 turn 提供显式分支入口，下一条消息以该 turn 为 parent，并记录 explicit fork lineage；
+- 完成的历史 turn 提供显式分支入口；后端为分支创建独立 session ID，复制截至所选 turn 的完整原生历史，并在 session creation metadata 中记录来源 session/turn。原会话与分支会话分别占据会话列表入口；
 - 未终结 turn 会从已落盘 response events 重建 partial 文本。仍在本进程运行时前端轮询，持久化了 response ID 的 background 可 attach；失去进程所有者的 foreground 或没有 response ID 的 background 自动记为失败。attach 断开后允许直接输入，发送时先 supersede 旧 response，再保留其 user input 接续新 turn；
 - 远端 API 4xx/5xx、streaming error、上游 `type: "error"` 事件以及没有 terminal event 就结束的流都会显示为错误并结束当前 turn，重新打开 session 不会再次 attach。composer 在运行中显示“停止生成”，优先调用 cancel，foreground 或 cancel 失败时将本地 turn 收敛为 failed；
 - session GET/list 是纯 projection，不执行恢复或写盘。Web 取得 data-directory 单写者租约后，在监听端口前统一处理上一实例遗留的不可恢复 turn；

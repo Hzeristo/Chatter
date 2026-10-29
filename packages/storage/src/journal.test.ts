@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { JsonObject, RunConfigurationSnapshot } from "@mas-chat/protocol";
 
-import { parseJournal, SessionStore } from "./journal.js";
+import {
+  parseJournal,
+  SessionStore,
+  type HistoricalJournalRecord,
+} from "./journal.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -267,6 +271,60 @@ describe("session journal", () => {
         unsequenced: true,
       }),
     );
+  });
+
+  it("creates an independent session from completed native history", async () => {
+    const store = await temporaryStore();
+    await store.createSession("source");
+    await store.beginTurn(
+      "source",
+      "turn-1",
+      [{ type: "message", role: "user", content: "Hello" }],
+      configuration,
+      { parentTurnId: null },
+    );
+    await store.recordResponseEvent("source", "turn-1", "resp-1", {
+      type: "response.completed",
+      sequence_number: 2,
+      response: { id: "resp-1", status: "completed", output: [] },
+    });
+    await store.recordTurnOutput(
+      "source",
+      "turn-1",
+      "resp-1",
+      "completed",
+      [{ id: "message-1", type: "message", role: "assistant", content: [] }],
+    );
+    const sourceRecords = await store.readJournal("source");
+    const history = sourceRecords.filter(
+      (record): record is HistoricalJournalRecord =>
+        record.kind !== "session.created",
+    );
+
+    await store.createSessionFromHistory(
+      "forked",
+      history,
+      { sourceSessionId: "source", sourceTurnId: "turn-1" },
+      new Date("2026-09-26T00:00:00Z"),
+    );
+
+    const snapshot = await store.inspectSession("forked");
+    expect(snapshot.metadata).toMatchObject({
+      sessionId: "forked",
+      status: "completed",
+      fork: { sourceSessionId: "source", sourceTurnId: "turn-1" },
+    });
+    expect(snapshot.metadata.activeTurnId).toBeUndefined();
+    expect(snapshot.records.map((record) => record.sessionId)).toEqual([
+      "forked",
+      "forked",
+      "forked",
+      "forked",
+    ]);
+    expect(snapshot.records[0]).toMatchObject({
+      kind: "session.created",
+      fork: { sourceSessionId: "source", sourceTurnId: "turn-1" },
+    });
   });
 
   it("repairs a stale metadata cursor from the durable journal", async () => {

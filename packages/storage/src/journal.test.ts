@@ -169,6 +169,106 @@ describe("session journal", () => {
     ).toEqual([0, 1, 3, 5]);
   });
 
+  it("persists an unsequenced lifecycle event without advancing the provider cursor", async () => {
+    const store = await temporaryStore();
+    await store.createSession("session-1");
+    await store.beginTurn(
+      "session-1",
+      "turn-1",
+      [{ type: "message", role: "user", content: "Hello" }],
+      configuration,
+    );
+
+    const result = await store.recordResponseEvent("session-1", "turn-1", "resp-1", {
+      type: "response.created",
+      response: { id: "resp-1", status: "queued", output: [] },
+    });
+
+    expect(result.duplicate).toBe(false);
+    expect(result.metadata).toMatchObject({
+      responseId: "resp-1",
+      lastSequenceNumber: -1,
+      status: "queued",
+    });
+    expect(await store.readJournal("session-1")).toContainEqual(
+      expect.objectContaining({
+        kind: "response.event",
+        sequenceNumber: 0,
+        unsequenced: true,
+      }),
+    );
+  });
+
+  it("preserves sequence zero after rebuilding an unsequenced bootstrap", async () => {
+    const store = await temporaryStore();
+    await store.createSession("session-1");
+    await store.beginTurn(
+      "session-1",
+      "turn-1",
+      [{ role: "user", content: "Hello" }],
+      configuration,
+    );
+    await store.recordResponseEvent("session-1", "turn-1", "resp-1", {
+      type: "response.created",
+      response: { id: "resp-1", status: "in_progress", output: [] },
+    });
+
+    const reopened = new SessionStore(store.rootDirectory);
+    expect((await reopened.inspectSession("session-1")).metadata.lastSequenceNumber)
+      .toBe(-1);
+    expect((await reopened.loadMetadata("session-1")).lastSequenceNumber).toBe(-1);
+
+    const event: JsonObject = {
+      type: "response.output_text.delta",
+      sequence_number: 0,
+      item_id: "msg-1",
+      output_index: 0,
+      content_index: 0,
+      delta: "Hello",
+    };
+    const first = await reopened.recordResponseEvent("session-1", "turn-1", "resp-1", event);
+    const duplicate = await reopened.recordResponseEvent("session-1", "turn-1", "resp-1", event);
+    expect(first.duplicate).toBe(false);
+    expect(duplicate.duplicate).toBe(true);
+    expect((await reopened.loadMetadata("session-1")).lastSequenceNumber).toBe(0);
+    const persisted = (await reopened.readJournal("session-1"))
+      .filter((record) => record.kind === "response.event");
+    expect(persisted.map((record) => record.event.type)).toEqual([
+      "response.created",
+      "response.output_text.delta",
+    ]);
+  });
+
+  it("uses the acknowledged cursor for an unsequenced terminal event", async () => {
+    const store = await temporaryStore();
+    await store.createSession("session-1");
+    await store.beginTurn(
+      "session-1",
+      "turn-1",
+      [{ type: "message", role: "user", content: "Hello" }],
+      configuration,
+    );
+    await store.recordResponseEvent("session-1", "turn-1", "resp-1", {
+      type: "response.created",
+      sequence_number: 0,
+      response: { id: "resp-1", status: "in_progress", output: [] },
+    });
+
+    const result = await store.recordResponseEvent("session-1", "turn-1", "resp-1", {
+      type: "response.failed",
+      response: { id: "resp-1", status: "failed", output: [] },
+    });
+
+    expect(result.metadata.lastSequenceNumber).toBe(0);
+    expect(await store.readJournal("session-1")).toContainEqual(
+      expect.objectContaining({
+        kind: "response.event",
+        sequenceNumber: 0,
+        unsequenced: true,
+      }),
+    );
+  });
+
   it("repairs a stale metadata cursor from the durable journal", async () => {
     const store = await temporaryStore();
     await store.createSession("session-repair");

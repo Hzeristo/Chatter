@@ -91,6 +91,7 @@ export async function streamEvents(
   events: AsyncIterable<NormalizedEvent>,
 ): Promise<void> {
   let connected = true;
+  let lastSequenceNumber = 0;
   response.on("close", () => {
     connected = false;
   });
@@ -101,6 +102,9 @@ export async function streamEvents(
     for await (const event of events) {
       if (connected && !response.destroyed) {
         writeSse(response, event);
+        if (Number.isSafeInteger(event.sequenceNumber) && event.sequenceNumber >= 0) {
+          lastSequenceNumber = Math.max(lastSequenceNumber, event.sequenceNumber);
+        }
       }
     }
   } catch (error) {
@@ -108,7 +112,7 @@ export async function streamEvents(
       writeSse(response, {
         kind: "error",
         sourceType: "server.error",
-        sequenceNumber: -1,
+        sequenceNumber: lastSequenceNumber,
         error: safeError(error),
       });
     }

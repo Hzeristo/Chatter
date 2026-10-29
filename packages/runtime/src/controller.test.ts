@@ -141,6 +141,268 @@ afterEach(async () => {
 });
 
 describe("RunController", () => {
+  it("ignores unsequenced Codex sideband events before and during a response", async () => {
+    const store = await temporaryStore();
+    const rateLimits = {
+      type: "codex.rate_limits",
+      plan_type: "plus",
+      rate_limits: { allowed: true },
+    };
+    const responseMetadata = {
+      type: "codex.response.metadata",
+      headers: { "x-codex-turn-state": "sensitive-state" },
+    };
+    const otherSideband = { type: "codex.other_metadata", detail: "sideband" };
+    const transport = new FakeTransport({
+      createEvents: [
+        rateLimits,
+        responseMetadata,
+        otherSideband,
+        {
+          type: "response.created",
+          sequence_number: 0,
+          response: { id: "resp-rate-limits", status: "queued", output: [] },
+        },
+        rateLimits,
+        responseMetadata,
+        otherSideband,
+        {
+          type: "response.completed",
+          sequence_number: 1,
+          response: { id: "resp-rate-limits", status: "completed", output: [] },
+        },
+      ],
+    });
+    const controller = new RunController(store, transport, () => "turn-rate-limits");
+
+    const events = await collect(
+      controller.start(
+        [{ role: "user", content: "Question" }] as ResponseInputItem[],
+        { sessionId: "session-1" },
+      ),
+    );
+
+    expect(events.map((event) => event.sequenceNumber)).toEqual([0, 1]);
+    expect((await store.loadMetadata("session-1"))).toMatchObject({
+      status: "completed",
+      lastSequenceNumber: 1,
+    });
+    expect(
+      (await store.readJournal("session-1"))
+        .filter((record) => record.kind === "response.event")
+        .map((record) => record.event.type),
+    ).toEqual(["response.created", "response.completed"]);
+  });
+
+  it("accepts a terminal event after unsequenced transport timing telemetry", async () => {
+    const store = await temporaryStore();
+    const transport = new FakeTransport({
+      createEvents: [
+        {
+          type: "response.created",
+          sequence_number: 0,
+          response: { id: "resp-timing", status: "in_progress", output: [] },
+        },
+        {
+          type: "response.output_item.done",
+          sequence_number: 40,
+          output_index: 0,
+          item: { id: "msg-timing", type: "message", role: "assistant", status: "completed", content: [] },
+        },
+        { type: "responsesapi.websocket_timing", timing_metrics: { elapsed_ms: 10 } },
+        {
+          type: "response.completed",
+          sequence_number: 41,
+          response: {
+            id: "resp-timing",
+            status: "completed",
+            output: [{ id: "msg-timing", type: "message", role: "assistant", content: [] }],
+          },
+        },
+      ],
+    });
+    const controller = new RunController(store, transport, () => "turn-timing");
+
+    const events = await collect(
+      controller.start(
+        [{ role: "user", content: "Question" }] as ResponseInputItem[],
+        { sessionId: "session-1" },
+      ),
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      kind: "terminal",
+      sequenceNumber: 41,
+      status: "completed",
+    });
+    expect((await store.loadMetadata("session-1"))).toMatchObject({
+      status: "completed",
+      lastSequenceNumber: 41,
+    });
+    expect((await store.readJournal("session-1")).at(-1)).toMatchObject({
+      kind: "turn.output",
+      status: "completed",
+      items: [expect.objectContaining({ id: "msg-timing" })],
+    });
+  });
+
+  it("commits a terminal response when the provider omits its sequence number", async () => {
+    const store = await temporaryStore();
+    const transport = new FakeTransport({
+      createEvents: [
+        {
+          type: "response.created",
+          sequence_number: 0,
+          response: { id: "resp-unsequenced-failed", status: "in_progress", output: [] },
+        },
+        {
+          type: "response.in_progress",
+          sequence_number: 1,
+          response: { id: "resp-unsequenced-failed", status: "in_progress", output: [] },
+        },
+        {
+          type: "response.failed",
+          response: { id: "resp-unsequenced-failed", status: "failed", output: [] },
+        },
+      ],
+    });
+    const controller = new RunController(store, transport, () => "turn-unsequenced-failed");
+
+    const events = await collect(
+      controller.start(
+        [{ role: "user", content: "Question" }] as ResponseInputItem[],
+        { sessionId: "session-1" },
+      ),
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      kind: "terminal",
+      sequenceNumber: 1,
+      status: "failed",
+    });
+    expect((await store.loadMetadata("session-1"))).toMatchObject({
+      status: "failed",
+      lastSequenceNumber: 1,
+    });
+    expect((await store.readJournal("session-1"))
+      .filter((record) => record.kind === "response.event")
+      .at(-1)).toMatchObject({
+        sequenceNumber: 1,
+        unsequenced: true,
+      });
+  });
+
+  it("resumes an unsequenced bootstrap before zero and persists duplicate delivery once", async () => {
+    const store = await temporaryStore();
+    await store.beginTurn(
+      "session-1",
+      "turn-bootstrap",
+      [{ role: "user", content: "Question" }],
+      {
+        model: "test-model", background: true, stream: true, store: false,
+        reasoning: {}, text: {}, tools: [], include: [],
+      },
+    );
+    await store.recordResponseEvent("session-1", "turn-bootstrap", "resp-bootstrap", {
+      type: "response.created",
+      response: { id: "resp-bootstrap", status: "in_progress", output: [] },
+    });
+    const delta: JsonObject = {
+      type: "response.output_text.delta",
+      sequence_number: 0,
+      item_id: "msg-bootstrap",
+      output_index: 0,
+      content_index: 0,
+      delta: "Recovered",
+    };
+    const transport = new FakeTransport({ resumeEvents: [
+      delta,
+      delta,
+      {
+        type: "response.completed",
+        sequence_number: 1,
+        response: {
+          id: "resp-bootstrap", status: "completed",
+          output: [{
+            id: "msg-bootstrap", type: "message", role: "assistant",
+            content: [{ type: "output_text", text: "Recovered", annotations: [] }],
+          }],
+        },
+      },
+    ] });
+    const reopened = new SessionStore(store.rootDirectory);
+    const normalized = await collect(new RunController(reopened, transport).attach("session-1"));
+
+    expect(transport.resumeCalls).toEqual([{ responseId: "resp-bootstrap", startingAfter: -1 }]);
+    expect(normalized.filter((event) => event.kind === "assistant_text"))
+      .toEqual([expect.objectContaining({ sequenceNumber: 0, delta: "Recovered" })]);
+    const records = await reopened.readJournal("session-1");
+    expect(records.filter((record) => record.kind === "response.event")
+      .map((record) => record.event.type)).toEqual([
+      "response.created", "response.output_text.delta", "response.completed",
+    ]);
+    expect((await reopened.loadMetadata("session-1"))).toMatchObject({
+      status: "completed", lastSequenceNumber: 1,
+    });
+    expect(buildReplayHistory(records).at(-1)).toMatchObject({
+      id: "msg-bootstrap",
+      content: [{ type: "output_text", text: "Recovered", annotations: [] }],
+    });
+  });
+
+  it("reports an unsequenced upstream error as a stream failure", async () => {
+    const store = await temporaryStore();
+    const transport = new FakeTransport({
+      createEvents: [{ type: "error", message: "upstream unavailable" }],
+    });
+    const controller = new RunController(store, transport, () => "turn-error");
+
+    await expect(
+      collect(
+        controller.start(
+          [{ role: "user", content: "Question" }] as ResponseInputItem[],
+          { sessionId: "session-1" },
+        ),
+      ),
+    ).rejects.toMatchObject({
+      name: "ResponseStreamError",
+      message: "Response stream error: upstream unavailable",
+    });
+    expect((await store.readJournal("session-1")).at(-1)).toMatchObject({
+      kind: "turn.failed",
+      error: { name: "ResponseStreamError" },
+    });
+  });
+
+  it("records an invalid event shape without persisting its payload", async () => {
+    const store = await temporaryStore();
+    const transport = new FakeTransport({
+      createEvents: [
+        { type: "response.output_text.delta", delta: "private content" },
+      ],
+    });
+    const controller = new RunController(store, transport, () => "turn-invalid");
+
+    await expect(
+      collect(
+        controller.start(
+          [{ role: "user", content: "Question" }] as ResponseInputItem[],
+          { sessionId: "session-1" },
+        ),
+      ),
+    ).rejects.toMatchObject({ name: "ResponseSequenceError" });
+
+    const failure = (await store.readJournal("session-1")).at(-1);
+    expect(failure).toMatchObject({
+      kind: "turn.failed",
+      error: {
+        eventType: "response.output_text.delta",
+        eventKeys: ["delta", "type"],
+      },
+    });
+    expect(JSON.stringify(failure)).not.toContain("private content");
+  });
+
   it("persists each event before exposing it and commits replayable output", async () => {
     const store = await temporaryStore();
     const transport = new FakeTransport({ createEvents: await loadFixture() });

@@ -84,6 +84,7 @@ export interface ResponseEventRecord extends JournalRecordBase {
   responseId: string;
   sequenceNumber: number;
   turnId: string;
+  unsequenced?: boolean;
 }
 
 export interface TurnOutputRecord extends JournalRecordBase {

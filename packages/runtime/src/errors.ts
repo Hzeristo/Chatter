@@ -1,12 +1,30 @@
 export class ResponseSequenceError extends Error {
   readonly expected: number;
-  readonly received: number;
+  readonly received: number | undefined;
+  readonly eventType?: string;
+  readonly eventKeys?: string[];
 
-  constructor(expected: number, received: number) {
-    super(`Response event sequence gap: expected ${expected}, received ${received}`);
+  constructor(
+    expected: number,
+    received: number | undefined,
+    details?: { eventType?: string; eventKeys?: string[] },
+  ) {
+    const reason =
+      received === undefined
+        ? "missing sequence_number"
+        : received < 0
+          ? "invalid sequence_number"
+          : "sequence gap";
+    super(
+      received === undefined
+        ? `Response event ${reason}: expected ${expected}`
+        : `Response event ${reason}: expected ${expected}, received ${received}`,
+    );
     this.name = "ResponseSequenceError";
     this.expected = expected;
     this.received = received;
+    if (details?.eventType !== undefined) this.eventType = details.eventType;
+    if (details?.eventKeys !== undefined) this.eventKeys = details.eventKeys;
   }
 }
 

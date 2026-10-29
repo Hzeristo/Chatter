@@ -126,7 +126,20 @@ function responseOutput(response: JsonObject): OpenAINativeItem[] {
 
 function errorRecord(error: unknown): JsonObject {
   if (error instanceof Error) {
-    return { name: error.name, message: error.message };
+    const diagnostic = error as Error & {
+      eventType?: unknown;
+      eventKeys?: unknown;
+    };
+    return {
+      name: error.name,
+      message: error.message,
+      ...(typeof diagnostic.eventType === "string"
+        ? { eventType: diagnostic.eventType }
+        : {}),
+      ...(Array.isArray(diagnostic.eventKeys)
+        ? { eventKeys: diagnostic.eventKeys }
+        : {}),
+    };
   }
   return { name: "UnknownError", message: String(error) };
 }
@@ -343,6 +356,23 @@ export class RunController {
 
     try {
       for await (const event of stream) {
+        const type = event.type;
+        if (
+          typeof type === "string" &&
+          type !== "error" &&
+          !type.startsWith("response.")
+        ) {
+          continue;
+        }
+        if (type === "error" && event.sequence_number === undefined) {
+          const message =
+            typeof event.message === "string"
+              ? event.message
+              : "The response stream emitted an error event";
+          const streamError = new Error(`Response stream error: ${message}`);
+          streamError.name = "ResponseStreamError";
+          throw streamError;
+        }
         const result = reduceResponseEvent(projection, event);
         projection = result.state;
         if (result.duplicate) {

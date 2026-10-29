@@ -84,6 +84,41 @@ describe("response event reducer", () => {
     ).toThrow(ResponseSequenceError);
   });
 
+  it("accepts an unsequenced lifecycle bootstrap without advancing the cursor", () => {
+    const bootstrap = reduceResponseEvent(createResponseProjection(), {
+      type: "response.created",
+      response: { id: "resp_bootstrap", status: "queued", output: [] },
+    });
+
+    expect(bootstrap.unsequenced).toBe(true);
+    expect(bootstrap.state.responseId).toBe("resp_bootstrap");
+    expect(bootstrap.state.lastSequenceNumber).toBe(-1);
+
+    const firstSequenced = reduceResponseEvent(bootstrap.state, {
+      type: "response.in_progress",
+      sequence_number: 0,
+      response: { id: "resp_bootstrap", status: "in_progress", output: [] },
+    });
+    expect(firstSequenced.unsequenced).toBeUndefined();
+    expect(firstSequenced.state.lastSequenceNumber).toBe(0);
+  });
+
+  it("reports the shape of an unsequenced content event", () => {
+    expect(() =>
+      reduceResponseEvent(createResponseProjection(), {
+        type: "response.output_text.delta",
+        delta: "diagnose me",
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        name: "ResponseSequenceError",
+        message: "Response event missing sequence_number: expected 0",
+        eventType: "response.output_text.delta",
+        eventKeys: ["delta", "type"],
+      }),
+    );
+  });
+
   it.each([
     ["response.failed", "failed"],
     ["response.incomplete", "incomplete"],
@@ -104,6 +139,34 @@ describe("response event reducer", () => {
     expect(state.status).toBe(status);
     expect(result.normalized).toContainEqual(
       expect.objectContaining({ kind: "terminal", status }),
+    );
+  });
+
+  it("accepts an unsequenced terminal event without rewinding the cursor", () => {
+    let state = reduceResponseEvent(createResponseProjection(), {
+      type: "response.created",
+      sequence_number: 0,
+      response: { id: "resp_unsequenced_terminal", status: "in_progress", output: [] },
+    }).state;
+    state = reduceResponseEvent(state, {
+      type: "response.in_progress",
+      sequence_number: 1,
+      response: { id: "resp_unsequenced_terminal", status: "in_progress", output: [] },
+    }).state;
+
+    const result = reduceResponseEvent(state, {
+      type: "response.failed",
+      response: { id: "resp_unsequenced_terminal", status: "failed", output: [] },
+    });
+
+    expect(result.unsequenced).toBe(true);
+    expect(result.state.lastSequenceNumber).toBe(1);
+    expect(result.normalized).toContainEqual(
+      expect.objectContaining({
+        kind: "terminal",
+        sequenceNumber: 1,
+        status: "failed",
+      }),
     );
   });
 

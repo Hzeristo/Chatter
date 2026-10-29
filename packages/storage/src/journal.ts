@@ -174,10 +174,9 @@ function rebuildMetadata(
         metadata = {
           ...metadata,
           activeTurnId: record.turnId,
-          lastSequenceNumber: Math.max(
-            metadata.lastSequenceNumber,
-            record.sequenceNumber,
-          ),
+          lastSequenceNumber: record.unsequenced
+            ? metadata.lastSequenceNumber
+            : Math.max(metadata.lastSequenceNumber, record.sequenceNumber),
           responseId: record.responseId,
           status: statusFromEvent(record.event, metadata.status),
           updatedAt: record.at,
@@ -361,8 +360,22 @@ export class SessionStore {
     assertSafeId(turnId);
     assertSafeId(responseId);
 
-    const sequenceNumber = event.sequence_number;
-    if (!Number.isSafeInteger(sequenceNumber) || (sequenceNumber as number) < 0) {
+    const rawSequenceNumber = event.sequence_number;
+    const eventType = typeof event.type === "string" ? event.type : undefined;
+    const unsequenced =
+      rawSequenceNumber === undefined &&
+      (eventType === "response.created" ||
+        eventType === "response.queued" ||
+        eventType === "response.in_progress" ||
+        eventType === "response.completed" ||
+        eventType === "response.failed" ||
+        eventType === "response.incomplete" ||
+        eventType === "response.cancelled");
+    if (
+      (!unsequenced &&
+        (!Number.isSafeInteger(rawSequenceNumber) ||
+          (rawSequenceNumber as number) < 0))
+    ) {
       throw new SessionStateError("Response event has no valid sequence_number");
     }
 
@@ -379,8 +392,10 @@ export class SessionStore {
         );
       }
 
-      const sequence = sequenceNumber as number;
-      if (sequence <= current.lastSequenceNumber) {
+      const sequence = unsequenced
+        ? Math.max(current.lastSequenceNumber, 0)
+        : (rawSequenceNumber as number);
+      if (!unsequenced && sequence <= current.lastSequenceNumber) {
         return { duplicate: true, metadata: current };
       }
 
@@ -394,11 +409,12 @@ export class SessionStore {
         sequenceNumber: sequence,
         event,
         at,
+        ...(unsequenced ? { unsequenced: true } : {}),
       };
       const metadata: SessionMetadata = {
         ...current,
         responseId,
-        lastSequenceNumber: sequence,
+        lastSequenceNumber: unsequenced ? current.lastSequenceNumber : sequence,
         status: statusFromEvent(event, current.status),
         updatedAt: at,
       };

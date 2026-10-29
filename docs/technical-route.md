@@ -182,7 +182,7 @@ UI 可以改变外观，但不得丢弃这些语义边界。
 
 ## 8. 恢复算法
 
-1. 每次接收事件，验证 `response_id` 与非负、单调前进的 `sequence_number`；序号允许稀疏，不把 `received > last + 1` 单独视为协议错误；
+1. 只让 `response.*` 与 `error` 事件进入 Responses reducer；其余带类型的附加事件跳过，不推进游标或落盘，已观察到 `codex.rate_limits`、`codex.response.metadata` 和 `responsesapi.websocket_timing`。无序号 `error` 作为上游流错误结束 turn。Responses 事件验证 `response_id` 与非负、单调前进的 `sequence_number`；序号允许稀疏，不把 `received > last + 1` 单独视为协议错误。兼容缺少游标的生命周期事件和终态事件：原始事件落盘并标记 `unsequenced`，使用当前已确认游标作为本地记录序号（尚无已确认游标时使用非负的本地序号 `0`），只更新 response ID/status，不推进 provider 游标；缺少游标的正文事件仍失败，错误记录只保留事件类型和字段名，不写入原始内容或 headers；
 2. 原始事件追加到 JSONL 并完成 flush；
 3. 原子更新 `lastSequenceNumber`；
 4. reducer 生成 UI 事件；

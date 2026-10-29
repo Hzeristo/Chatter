@@ -16,6 +16,8 @@ export interface ReduceResult {
   duplicate: boolean;
   normalized: NormalizedEvent[];
   state: ResponseProjection;
+  /** True when the provider event was handled without advancing its cursor. */
+  unsequenced?: boolean;
 }
 
 function objectValue(value: JsonValue | undefined): JsonObject | undefined {
@@ -124,6 +126,15 @@ function statusFromTerminalType(type: string): TerminalStatus | undefined {
   }
 }
 
+function canHandleWithoutCursor(type: string): boolean {
+  return (
+    type === "response.created" ||
+    type === "response.queued" ||
+    type === "response.in_progress" ||
+    statusFromTerminalType(type) !== undefined
+  );
+}
+
 function cloneProjection(state: ResponseProjection): ResponseProjection {
   const clone: ResponseProjection = {
     status: state.status,
@@ -155,15 +166,23 @@ export function reduceResponseEvent(
   state: ResponseProjection,
   event: JsonObject,
 ): ReduceResult {
+  const type = stringValue(event.type) ?? "unknown";
   const sequenceNumber = numberValue(event.sequence_number);
-  if (sequenceNumber === undefined || sequenceNumber < 0) {
-    throw new ResponseSequenceError(state.lastSequenceNumber + 1, -1);
+  const unsequenced =
+    sequenceNumber === undefined && canHandleWithoutCursor(type);
+  if (
+    (sequenceNumber === undefined && !unsequenced) ||
+    (sequenceNumber !== undefined && sequenceNumber < 0)
+  ) {
+    throw new ResponseSequenceError(state.lastSequenceNumber + 1, sequenceNumber, {
+      eventType: type,
+      eventKeys: Object.keys(event).sort(),
+    });
   }
-  if (sequenceNumber <= state.lastSequenceNumber) {
+  if (sequenceNumber !== undefined && sequenceNumber <= state.lastSequenceNumber) {
     return { state, normalized: [], duplicate: true };
   }
 
-  const type = stringValue(event.type) ?? "unknown";
   const incomingResponseId = responseIdFromEvent(event);
   if (
     state.responseId !== undefined &&
@@ -174,12 +193,14 @@ export function reduceResponseEvent(
   }
 
   const next = cloneProjection(state);
-  next.lastSequenceNumber = sequenceNumber;
+  if (sequenceNumber !== undefined) {
+    next.lastSequenceNumber = sequenceNumber;
+  }
   if (incomingResponseId !== undefined) {
     next.responseId = incomingResponseId;
   }
   const base = {
-    sequenceNumber,
+    sequenceNumber: sequenceNumber ?? Math.max(state.lastSequenceNumber, 0),
     sourceType: type,
     ...(next.responseId === undefined ? {} : { responseId: next.responseId }),
   };
@@ -377,7 +398,12 @@ export function reduceResponseEvent(
     }
   }
 
-  return { state: next, normalized, duplicate: false };
+  return {
+    state: next,
+    normalized,
+    duplicate: false,
+    ...(unsequenced ? { unsequenced: true } : {}),
+  };
 }
 
 export function statusFromResponseEvent(event: JsonObject): RunStatus | undefined {

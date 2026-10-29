@@ -23,6 +23,7 @@ export interface TurnVersionView {
 
 export interface SessionMessageView {
   id: string;
+  kind?: "status";
   partial?: boolean;
   phase?: "commentary" | "final_answer" | "unknown";
   role: "user" | "assistant";
@@ -161,11 +162,11 @@ function statusNotice(status: RunStatus): string | undefined {
     case "in_progress":
       return "响应尚未完成";
     case "failed":
-      return "响应已中断";
+      return "响应生成失败";
     case "incomplete":
-      return "响应未完整完成";
+      return "响应未完成";
     case "cancelled":
-      return "响应已取消";
+      return "响应已停止";
     default:
       return undefined;
   }
@@ -250,11 +251,11 @@ export function createSessionView(
     if (notice !== undefined) {
       messages.push({
         id: `${turn.input.turnId}:status`,
+        kind: "status",
         role: "assistant",
         text: notice,
         turnId: turn.input.turnId,
-        partial: true,
-        phase: "commentary",
+        turnStatus: turn.status,
       });
     }
   }

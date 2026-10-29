@@ -168,7 +168,7 @@ async function main(): Promise<void> {
         ? {}
         : { preview: preview.slice(0, 96) }),
       messageCount: view.messages.filter(
-        (message) => !message.id.endsWith(":status"),
+        (message) => message.kind !== "status",
       ).length,
     };
   }

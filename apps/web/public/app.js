@@ -441,7 +441,27 @@ function clearConversation() {
   state.userMessages.clear();
 }
 
+function addResponseStatus(message) {
+  const follow = elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight < 80;
+  const row = document.createElement("div");
+  row.className = "response-status";
+  row.dataset.messageId = message.id;
+  row.dataset.status = message.turnStatus;
+  row.setAttribute("role", "status");
+  const indicator = document.createElement("span");
+  indicator.className = "response-status-indicator";
+  indicator.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.textContent = message.text;
+  row.append(indicator, label);
+  elements.messages.append(row);
+  if (follow) elements.messages.scrollTop = elements.messages.scrollHeight;
+}
+
 function addMessage(message) {
+  if (message.kind === "status") {
+    return addResponseStatus(message);
+  }
   const follow = elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight < 80;
   const wrapper = document.createElement("article");
   wrapper.className = `message ${message.role}${message.phase === "commentary" ? " commentary" : ""}`;

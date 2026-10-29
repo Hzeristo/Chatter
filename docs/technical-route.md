@@ -270,6 +270,17 @@ Application service 维护进程内 run registry，用来区分“页面连接�
 - 过密的行为约束可能把开放式交流重新解释成 agent 任务：`complete the task`、`answer directly`、`final answer` 等收束语义可能提高 premature closure 和“working as agent”轨迹的概率，削弱松弛的连续长回答。API 不暴露 logits，因此这目前是待验证的机制假设，不是已证实的因果结论。
 - Prompt 实验不能只看输出字符数：需要同时记录 reasoning token、输出结构、论证推进、结论出现位置和盲评的语境适配度，避免把无效冗长误判为网页端风格。
 
+### 2026-09-28：当前端点实测结论
+
+范围仅限 `https://www.micuapi.ai/v1`，不作为官方模型能力排名。
+
+- **Astra 续轮兼容性未通过**：本地完整 native history 重放已核对；请求 `max` 时，原第二轮及两次原样复跑均报告 `xhigh`，随后同一请求哈希在字段矩阵的创建事件又报告 `max`。尚未找到可靠触发条件；该矩阵没有保留终态正文，`max_output_tokens:1024` 的完整质量复跑在 `max` 创建后发生 `upstream_error`。未取得可复核的该续轮 `max` 正文，不能证明 effort 偏移或搜索正文缺失导致质量下降。
+- **Sol 已有可用的研究续轮样本**：`c830ffa5-ad4b-4363-8123-544a2c22215d` 首轮为 `gpt-6-sol/max`；完整重放其 41 个历史 item、采用正常 continuation cue 的独立接续实验一次完成，创建与终态均为 `max/all_turns`，返回 22 段可见摘要、3,072 字符正文。文本审阅认为它能接续前文、纠正概括并讨论规则基线，但最小任务仍偏简单；这支持继续使用 Sol，不证明普遍胜过 Astra 或长期稳定性。
+- **工作选择**：当前端点的研究讨论优先使用 `gpt-6-sol/max`，停止本轮 Astra 字段试探。代码默认模型和既有架构边界未在本轮更改。
+- **通用限制**：实测请求 `background:true` 而响应报告 `background:false`；矩阵的 cancel 调用均返回 404。后台恢复、取消与 30 分钟耐久性仍未验证，不能因回答完成就宣称端点完整兼容。
+
+本地证据（不入 Git）：[Astra 原样复跑](../outputs/second-turn-effort-probe-2026-09-28T05-54-01-397Z.json)、[字段矩阵](../outputs/second-turn-field-matrix-2026-09-28T06-12-19-092Z.json)、[质量复跑](../outputs/second-turn-max-quality-2026-09-28T06-33-08-336Z.json)、[Sol 调用记录](../outputs/sol-grounding-followup-2026-09-28T08-24-18-509Z.json)与[回答原文](../outputs/sol-grounding-followup-2026-09-28T08-24-18-509Z.md)。本轮临时 API 探针脚本已删除，报告与正式会话保留。
+
 ## 12. 官方依据
 
 - Background mode: <https://developers.openai.com/api/docs/guides/background>
